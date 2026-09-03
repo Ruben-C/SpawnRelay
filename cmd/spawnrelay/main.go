@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/Ruben-C/SpawnRelay/internal/client"
+	"github.com/Ruben-C/SpawnRelay/internal/firewall"
 	"github.com/Ruben-C/SpawnRelay/internal/server"
 )
 
@@ -25,12 +26,13 @@ var version = "dev"
 const usageText = `SpawnRelay %s - expose local game servers through a relay without opening ports.
 
 Usage:
-  spawnrelay server [flags]    run the relay server (tunnel + management UI/API)
-  spawnrelay client [flags]    connect this machine to a relay server
-  spawnrelay version           print the version
+  spawnrelay server [flags]          run the relay server (tunnel + management UI/API)
+  spawnrelay client [flags]          connect this machine to a relay server
+  spawnrelay firewall-agent [flags]  root helper that opens/closes host firewall ports for the server
+  spawnrelay version                 print the version
 
-Run "spawnrelay server -h" or "spawnrelay client -h" for flags. Every flag can
-also be set through the environment variable shown next to it.
+Run "spawnrelay <command> -h" for flags. Every flag can also be set through
+the environment variable shown next to it.
 `
 
 func main() {
@@ -44,6 +46,8 @@ func main() {
 		err = runServer(os.Args[2:])
 	case "client":
 		err = runClient(os.Args[2:])
+	case "firewall-agent":
+		err = runFirewallAgent(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -173,6 +177,7 @@ func runServer(args []string) error {
 	fs.StringVar(&cfg.PublicHost, "public-host", envOr("SPAWNRELAY_PUBLIC_HOST", ""), "public hostname or IP of this server; saved to settings [SPAWNRELAY_PUBLIC_HOST]")
 	fs.StringVar(&cfg.AdminCert, "admin-cert", envOr("SPAWNRELAY_ADMIN_CERT", ""), "PEM certificate for the management interface (default: self-signed) [SPAWNRELAY_ADMIN_CERT]")
 	fs.StringVar(&cfg.AdminKey, "admin-key", envOr("SPAWNRELAY_ADMIN_KEY", ""), "PEM private key for the management interface [SPAWNRELAY_ADMIN_KEY]")
+	fs.StringVar(&cfg.FirewallSocket, "firewall-socket", envOr("SPAWNRELAY_FIREWALL_SOCKET", ""), "unix socket of the firewall agent (default: <data-dir>/firewall.sock) [SPAWNRELAY_FIREWALL_SOCKET]")
 	fs.BoolVar(&cfg.ResetAdminPassword, "reset-admin-password", envBool("SPAWNRELAY_RESET_ADMIN_PASSWORD"), "generate a new admin password at startup [SPAWNRELAY_RESET_ADMIN_PASSWORD]")
 	fs.StringVar(&logLevel, "log-level", envOr("SPAWNRELAY_LOG_LEVEL", "info"), "debug|info|warn|error [SPAWNRELAY_LOG_LEVEL]")
 	fs.StringVar(&logFormat, "log-format", envOr("SPAWNRELAY_LOG_FORMAT", "text"), "text|json [SPAWNRELAY_LOG_FORMAT]")
@@ -190,6 +195,34 @@ func runServer(args []string) error {
 		return err
 	}
 	return srv.Run(signalContext())
+}
+
+func runFirewallAgent(args []string) error {
+	if err := preloadEnvFile(args); err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("firewall-agent", flag.ExitOnError)
+	var dataDir, socket, logLevel, logFormat, envFile string
+	fs.StringVar(&envFile, "env-file", "", "file with KEY=VALUE lines to load into the environment first")
+	fs.StringVar(&dataDir, "data-dir", envOr("SPAWNRELAY_DATA_DIR", defaultDataDir()), "server state directory; the socket is created there [SPAWNRELAY_DATA_DIR]")
+	fs.StringVar(&socket, "socket", envOr("SPAWNRELAY_FIREWALL_SOCKET", ""), "unix socket path (default: <data-dir>/firewall.sock) [SPAWNRELAY_FIREWALL_SOCKET]")
+	fs.StringVar(&logLevel, "log-level", envOr("SPAWNRELAY_LOG_LEVEL", "info"), "debug|info|warn|error [SPAWNRELAY_LOG_LEVEL]")
+	fs.StringVar(&logFormat, "log-format", envOr("SPAWNRELAY_LOG_FORMAT", "text"), "text|json [SPAWNRELAY_LOG_FORMAT]")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	log, err := newLogger(logLevel, logFormat)
+	if err != nil {
+		return err
+	}
+	if socket == "" {
+		socket = filepath.Join(dataDir, "firewall.sock")
+	}
+	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
+		log.Warn("firewall agent is not running as root; firewall changes will most likely fail")
+	}
+	log.Info("SpawnRelay firewall agent starting", "version", version, "socket", socket)
+	return firewall.Serve(signalContext(), firewall.AgentConfig{Socket: socket, LedgerDir: dataDir, Version: version, Logger: log})
 }
 
 func runClient(args []string) error {

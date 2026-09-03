@@ -112,6 +112,9 @@ type Admin struct {
 type Settings struct {
 	// PublicHost is the hostname or IP players and clients use to reach the relay.
 	PublicHost string `json:"public_host"`
+	// Firewall is the host firewall management mode: "auto" (default when
+	// empty), "off", or a specific backend (ufw, firewalld, nftables, iptables).
+	Firewall string `json:"firewall,omitempty"`
 }
 
 // State is the on-disk document.

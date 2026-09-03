@@ -75,6 +75,13 @@
           <div class="muted small" id="detected-host"></div>
           <button class="btn primary" type="submit">Save</button>
         </form>
+        <form id="firewall-form" class="card">
+          <h3>Host firewall</h3>
+          <p class="muted">SpawnRelay can open and close ports in this server's firewall by itself: the tunnel port, the management port and every enabled forward. Disabled or deleted forwards are closed again. Only rules tagged <span class="mono">spawnrelay:</span> are ever touched.</p>
+          <label>Mode <select name="firewall"></select></label>
+          <div class="small" id="firewall-status"></div>
+          <button class="btn primary" type="submit">Save</button>
+        </form>
         <form id="password-form" class="card">
           <h3>Change admin password</h3>
           <label>Current password <input name="current_password" type="password" required autocomplete="current-password"></label>

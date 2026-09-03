@@ -108,11 +108,32 @@ else
   log "keeping existing $CONF_DIR/server.env"
 fi
 
+# The firewall agent runs as root so the relay server itself never needs
+# firewall privileges. It only ever adds/removes rules tagged "spawnrelay:".
+cat >/etc/systemd/system/spawnrelay-firewall.service <<UNIT
+[Unit]
+Description=SpawnRelay firewall agent (opens/closes relay ports in the host firewall)
+After=network-online.target ufw.service firewalld.service nftables.service
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=${CONF_DIR}/server.env
+ExecStart=${BIN} firewall-agent
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 cat >/etc/systemd/system/spawnrelay-server.service <<UNIT
 [Unit]
 Description=SpawnRelay relay server
-After=network-online.target
-Wants=network-online.target
+After=network-online.target spawnrelay-firewall.service
+Wants=network-online.target spawnrelay-firewall.service
 
 [Service]
 User=${SVC_USER}
@@ -134,6 +155,8 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
+systemctl enable --now spawnrelay-firewall.service
+systemctl restart spawnrelay-firewall.service
 systemctl enable --now spawnrelay-server.service
 systemctl restart spawnrelay-server.service
 
@@ -159,6 +182,8 @@ echo "  Tunnel port   : ${TUNNEL_PORT}/tcp"
 [ -n "$FINGERPRINT" ] && echo "  Fingerprint   : sha256:${FINGERPRINT}"
 echo
 echo "  The UI uses a self-signed certificate; your browser will warn once."
-echo "  Open these in your firewall / cloud security group:"
-echo "    ${TUNNEL_PORT}/tcp (clients), ${ADMIN_PORT}/tcp (management), and every forward port you create."
-echo "  Logs: journalctl -u spawnrelay-server -f"
+echo "  Host firewall : managed by spawnrelay-firewall (ufw/firewalld/nftables/iptables detected"
+echo "                  automatically; see Settings in the UI). It opens ${TUNNEL_PORT}/tcp,"
+echo "                  ${ADMIN_PORT}/tcp and every forward you create."
+echo "  If this VPS sits behind a cloud security group, open those ports there too."
+echo "  Logs: journalctl -u spawnrelay-server -u spawnrelay-firewall -f"

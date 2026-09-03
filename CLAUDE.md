@@ -8,12 +8,13 @@ API (documented in docs/API.md).
 
 ## Layout
 
-- `cmd/spawnrelay` – single binary: `spawnrelay server` and `spawnrelay client`
+- `cmd/spawnrelay` – single binary: `spawnrelay server`, `spawnrelay client` and `spawnrelay firewall-agent`
 - `internal/protocol` – wire format (Hello handshake, stream headers, UDP framing)
 - `internal/tlsutil` – self-signed certs and fingerprint pinning
 - `internal/store` – JSON state file (clients, forwards, tokens, admin, settings)
 - `internal/server` – tunnel manager (`tunnel.go`), HTTPS API (`api.go`, `auth.go`), embedded UI (`web/`), embedded client installers (`scripts/`)
 - `internal/client` – outbound tunnel client
+- `internal/firewall` – host firewall management: backends (ufw, firewalld, nftables, iptables), the root `firewall-agent` (unix socket) and its client; `internal/server/firewall.go` drives it
 - `scripts/install-server.sh` – VPS installer (systemd)
 - `docs/API.md` – API reference; keep it in sync with `internal/server/api.go`
 

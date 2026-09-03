@@ -32,7 +32,11 @@ writes `/etc/spawnrelay/server.env`, starts `spawnrelay-server.service` and
 prints the management URL, the generated admin password and the tunnel
 certificate fingerprint.
 
-Open these ports in your firewall / cloud security group:
+The installer also starts `spawnrelay-firewall.service`, a small root-only
+agent that opens and closes ports in the VPS's own firewall (ufw, firewalld,
+nftables or iptables, detected automatically) as you manage forwards. See
+[Host firewall](#host-firewall). If your VPS sits behind a cloud security
+group, open these there:
 
 | Port | Purpose |
 |---|---|
@@ -81,6 +85,28 @@ immediately. Give players `relay.example.com:<public port>`.
 Forwards can be edited, disabled/enabled and deleted at any time. Traffic
 counters and active connection counts are shown live.
 
+## Host firewall
+
+SpawnRelay manages the relay's host firewall for you across the whole
+lifecycle of a forward: creating or enabling a forward opens its public port,
+disabling or deleting it closes the port again, and the tunnel and management
+ports are kept open too. The **Forwards** tab shows the firewall state of
+every forward and **Settings → Host firewall** shows which backend is in use.
+
+- The relay server itself stays unprivileged. Firewall changes are made by
+  `spawnrelay firewall-agent`, a root-only helper (`spawnrelay-firewall.service`)
+  that listens on `/var/lib/spawnrelay/firewall.sock` and accepts exactly one
+  request: the list of ports that should be open.
+- Every rule it creates is tagged `spawnrelay:<id>`. It never touches other
+  rules, so your SSH rule and anything else you configured by hand are safe,
+  and a hand-made rule that already allows a forward's port is reused rather
+  than duplicated or removed.
+- Backends: firewalld, ufw, nftables, iptables (auto-detected in that order,
+  or pick one explicitly in Settings). Choose **Off** to leave the firewall
+  entirely to yourself.
+- Cloud security groups (AWS, Hetzner, DigitalOcean, …) are outside the VPS
+  and still need to be opened by hand.
+
 ## Automation / API
 
 Create a token under **API tokens** and use it as a bearer token:
@@ -120,11 +146,17 @@ Server flags (each also readable from the environment variable in brackets):
 | `--admin-addr` `[SPAWNRELAY_ADMIN_ADDR]` | `:8443` | HTTPS management UI/API |
 | `--public-host` `[SPAWNRELAY_PUBLIC_HOST]` | detected | hostname/IP used in install commands and player addresses |
 | `--admin-cert` / `--admin-key` | self-signed | your own certificate for the management interface |
+| `--firewall-socket` `[SPAWNRELAY_FIREWALL_SOCKET]` | `<data-dir>/firewall.sock` | unix socket of the firewall agent |
 | `--reset-admin-password` | – | generate a new admin password at start (written to `<data-dir>/initial-admin-password`) |
 | `--log-level`, `--log-format` | `info`, `text` | logging |
 
 Client flags: `--server host:port`, `--token`, `--fingerprint`, `--env-file`
 (`[SPAWNRELAY_SERVER]`, `[SPAWNRELAY_TOKEN]`, `[SPAWNRELAY_FINGERPRINT]`).
+
+Firewall agent flags (`spawnrelay firewall-agent`, run as root): `--data-dir`,
+`--socket` (`[SPAWNRELAY_FIREWALL_SOCKET]`), `--log-level`, `--log-format`.
+The backend is chosen from the server's settings on every request, so the
+agent needs no configuration of its own.
 
 Serving client binaries for other platforms: the server hands out its own
 executable to clients on the same OS/architecture. For other platforms put

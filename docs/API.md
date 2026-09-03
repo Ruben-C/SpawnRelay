@@ -90,14 +90,38 @@ credentials: token management, password change and settings. They return
 #### `GET /settings`
 
 ```json
-{"public_host": "relay.example.com", "detected_public_host": "203.0.113.5", "effective_public_host": "relay.example.com"}
+{
+  "public_host": "relay.example.com",
+  "detected_public_host": "203.0.113.5",
+  "effective_public_host": "relay.example.com",
+  "firewall": "auto",
+  "firewall_modes": ["auto", "off", "ufw", "firewalld", "nftables", "iptables"],
+  "firewall_status": {
+    "mode": "auto",
+    "managed": true,
+    "agent": "connected",
+    "backend": "ufw",
+    "active": true,
+    "last_sync": "2026-09-03T10:00:00Z",
+    "socket": "/var/lib/spawnrelay/firewall.sock"
+  }
+}
 ```
+
+`firewall_status.agent` is one of `connected`, `not installed` (no agent
+socket in the data directory), `unreachable` (the agent did not answer; see
+`error`) or `off`. `backend` is the firewall tool in use, or `none` when the
+agent found no active host firewall. `note` and `error` carry human-readable
+detail when present. See [Host firewall](#host-firewall).
 
 #### `PUT /settings` (session only)
 
-Body: `{"public_host": "relay.example.com"}`. An empty string reverts to the
-detected address. The public host is used in generated install commands and
-in the `public_addr` of every forward.
+Body: any subset of `{"public_host": "relay.example.com", "firewall": "auto"}`.
+An empty `public_host` reverts to the detected address. The public host is
+used in generated install commands and in the `public_addr` of every forward.
+`firewall` must be one of `firewall_modes`; changing it triggers an immediate
+firewall sync. Switching to `off` stops managing the firewall but leaves the
+rules that were already created in place.
 
 ### Clients
 
@@ -167,20 +191,33 @@ Forward object:
     "active_tcp": 3, "active_udp": 0,
     "total_connections": 41,
     "bytes_in": 128000, "bytes_out": 5400000
-  }
+  },
+  "firewall": {"state": "open"}
 }
 ```
 
 `protocol` is `tcp`, `udp` or `both`. `bytes_in` counts bytes received on the
 public port; `bytes_out` counts bytes sent back to players.
 
+`firewall.state` reports whether the host firewall lets players reach the
+public port (see [Host firewall](#host-firewall)):
+
+| State | Meaning |
+|---|---|
+| `open` | SpawnRelay added a rule for this port |
+| `existing` | a rule that is not SpawnRelay's already allows the port; nothing was added and it will not be removed |
+| `closed` | the forward is disabled, so SpawnRelay's rule was removed |
+| `error` | the firewall tool refused; `firewall.error` has the message |
+| `none` | the agent is running but found no active host firewall |
+| `unmanaged` | firewall management is off or the agent is not installed |
+
 | Method | Path | Body | Result |
 |---|---|---|---|
 | `GET` | `/forwards` | – | all forwards, sorted by public port. Filter with `?client_id=…` |
-| `POST` | `/forwards` | see below | `201` created forward; the public port is bound immediately |
+| `POST` | `/forwards` | see below | `201` created forward; the public port is bound and opened in the firewall immediately |
 | `GET` | `/forwards/{id}` | – | one forward |
-| `PATCH` | `/forwards/{id}` | any subset of the create fields | listeners are restarted if needed |
-| `DELETE` | `/forwards/{id}` | – | closes the public port |
+| `PATCH` | `/forwards/{id}` | any subset of the create fields | listeners are restarted and firewall rules updated if needed |
+| `DELETE` | `/forwards/{id}` | – | closes the public port and removes its firewall rule |
 
 Create body fields:
 
@@ -219,6 +256,40 @@ curl -k -X PATCH -H "Authorization: Bearer $SR_TOKEN" -H "Content-Type: applicat
 # Remove it
 curl -k -X DELETE -H "Authorization: Bearer $SR_TOKEN" "$SR/forwards/0f1e2d3c4b5a"
 ```
+
+### Host firewall
+
+SpawnRelay keeps the relay host's own firewall in step with its configuration:
+the tunnel port, the management port and the public port of every enabled
+forward are opened, and a forward's rule is removed as soon as it is disabled
+or deleted. A firewall problem never fails a forward request; it is reported
+in the forward's `firewall` field and in `GET /settings`.
+
+The relay server runs unprivileged, so the actual firewall changes are made by
+a separate root-only process, `spawnrelay firewall-agent`, installed by the
+server installer as `spawnrelay-firewall.service`. The server talks to it over
+a unix socket in the data directory and can only ask for one thing: "make the
+set of ports you have opened equal to this list". Every rule the agent creates
+is tagged `spawnrelay:<forward id>` (`spawnrelay:tunnel` and
+`spawnrelay:admin` for the relay's own ports); it never adds, changes or
+removes anything else, so rules you created by hand, including one that
+happens to allow the same port, are left alone.
+
+Supported backends, detected automatically in this order when the mode is
+`auto`: **firewalld** (`firewall-cmd`, runtime and permanent, default zone),
+**ufw** (when active), **nftables** (tagged accept rules inserted at the top
+of every input chain), **iptables** (tagged rules inserted at the top of
+`INPUT`, plus `ip6tables` when installed). Raw nftables and iptables rules are
+not persisted by SpawnRelay; the server re-syncs at start-up, on every
+change and every five minutes, which restores them after a reboot once the
+base ruleset is back.
+
+The firewall agent cannot open ports in a cloud provider's security group.
+Those still have to be opened by hand.
+
+Sync cadence: on server start, after every forward or client change, when
+the firewall mode changes, every five minutes, and every 20 seconds while
+the last sync failed or the agent is not installed.
 
 ### API tokens (session only)
 

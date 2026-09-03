@@ -93,6 +93,11 @@ td.wrap { white-space: normal; }
 .copy { cursor: pointer; border-bottom: 1px dashed var(--muted); }
 .copy:hover { color: var(--accent); border-color: var(--accent); }
 .subtle { color: var(--muted); font-size: .82rem; }
+.subtle.ok, .ok { color: var(--ok); }
+.subtle.err, .err { color: var(--danger); }
+.warn-text { color: var(--warn); }
+#firewall-status { margin: .25rem 0 .9rem; }
+#firewall-status div { margin-bottom: .3rem; }
 
 /* toggle */
 .toggle { position: relative; width: 38px; height: 22px; background: #33434c; border-radius: 999px; border: none; cursor: pointer; padding: 0; }

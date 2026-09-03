@@ -55,6 +55,16 @@
   const fmtAgo = (iso) => { if (!iso) return "never"; const s = Math.max(0, (Date.now() - new Date(iso)) / 1000); if (s < 60) return "just now"; if (s < 3600) return `${Math.floor(s / 60)} min ago`; if (s < 86400) return `${Math.floor(s / 3600)} h ago`; return `${Math.floor(s / 86400)} d ago`; };
   const fmtDur = (sec) => { if (sec < 3600) return `${Math.floor(sec / 60)}m`; if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`; return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`; };
   const badge = (proto) => `<span class="badge ${esc(proto)}">${esc(proto === "both" ? "TCP+UDP" : proto.toUpperCase())}</span>`;
+  const fwLine = (fw) => {
+    if (!fw) return "";
+    switch (fw.state) {
+      case "open": return `<div class="subtle ok">firewall: open</div>`;
+      case "existing": return `<div class="subtle ok" title="An existing firewall rule already allows this port; SpawnRelay left it alone.">firewall: open (existing rule)</div>`;
+      case "closed": return `<div class="subtle">firewall: closed</div>`;
+      case "error": return `<div class="subtle err" title="${esc(fw.error || "")}">firewall: error</div>`;
+      default: return "";
+    }
+  };
 
   // ---- views --------------------------------------------------------------
   function showLogin() { clearInterval(state.timer); $("#app").hidden = true; $("#login").hidden = false; $("input[name=password]", $("#login-form")).focus(); }
@@ -102,7 +112,7 @@
         <td><strong>${esc(f.name)}</strong>${f.enabled ? "" : ' <span class="badge off">disabled</span>'}</td>
         <td><span class="dot ${online ? "on" : "off"}"></span>${esc(f.client_name || "?")}</td>
         <td>${badge(f.protocol)}</td>
-        <td class="mono"><span class="copy" data-copy="${esc(f.public_addr)}" title="Click to copy">${esc(f.public_addr)}</span></td>
+        <td class="mono"><span class="copy" data-copy="${esc(f.public_addr)}" title="Click to copy">${esc(f.public_addr)}</span>${fwLine(f.firewall)}</td>
         <td class="mono">${esc(f.target_host)}:${f.target_port}</td>
         <td><span title="active connections">${active} active</span><div class="subtle">${st.total_connections || 0} total · ${fmtBytes(st.bytes_in)} in / ${fmtBytes(st.bytes_out)} out</div></td>
         <td><button class="toggle ${f.enabled ? "on" : ""}" data-action="toggle-forward" data-id="${f.id}" data-enabled="${f.enabled}" title="${f.enabled ? "Disable" : "Enable"}"></button></td>
@@ -131,12 +141,35 @@
     const s = state.status, st = state.settings; if (!s || !st) return;
     $("#settings-form input[name=public_host]").value = st.public_host || "";
     $("#detected-host").textContent = st.detected_public_host ? `Detected address: ${st.detected_public_host}` : "Could not detect an outbound address; set one explicitly.";
+    const fwSel = $("#firewall-form select[name=firewall]");
+    if (document.activeElement !== fwSel) {
+      fwSel.innerHTML = (st.firewall_modes || ["auto", "off"]).map((m) => `<option value="${esc(m)}" ${m === st.firewall ? "selected" : ""}>${esc(FW_LABELS[m] || m)}</option>`).join("");
+    }
+    $("#firewall-status").innerHTML = fwStatusText(st.firewall_status);
     $("#server-info-list").innerHTML = `
       <dt>Version</dt><dd>${esc(s.version)} (${esc(s.os)}/${esc(s.arch)})</dd>
       <dt>Tunnel</dt><dd class="mono">${esc(s.tunnel_addr)}</dd>
       <dt>Fingerprint</dt><dd class="mono copy" data-copy="${esc(s.tunnel_fingerprint)}" title="Click to copy">${esc(s.tunnel_fingerprint)}</dd>
       <dt>Admin URL</dt><dd class="mono">${esc(s.admin_url)}</dd>
       <dt>Admin cert</dt><dd>${s.admin_self_signed ? "self-signed (browser warning expected)" : "custom certificate"}</dd>`;
+  }
+
+  const FW_LABELS = { auto: "Automatic (detect ufw, firewalld, nftables or iptables)", off: "Off (do not touch the firewall)", ufw: "ufw", firewalld: "firewalld", nftables: "nftables", iptables: "iptables" };
+
+  function fwStatusText(fs) {
+    if (!fs) return "";
+    const line = (cls, text) => `<div class="${cls}">${text}</div>`;
+    switch (fs.agent) {
+      case "off": return line("muted", "Firewall management is off. The tunnel, management and forward ports must be opened by hand.");
+      case "not installed": return line("warn-text", `Firewall agent not running (no socket at <span class="mono">${esc(fs.socket)}</span>). Re-run the server installer to add the <span class="mono">spawnrelay-firewall</span> service, or open ports by hand.`);
+      case "unreachable": return line("err", `Firewall agent did not answer: ${esc(fs.error || "unknown error")}`);
+    }
+    let out = "";
+    if (fs.backend === "none") out += line("warn-text", "Agent connected, but no active host firewall was detected. If this VPS uses a cloud security group, open the ports there.");
+    else out += line("ok", `Agent connected · backend: ${esc(fs.backend)}${fs.active ? "" : " (inactive)"} · tunnel, management and every enabled forward port are kept open automatically${fs.last_sync ? ` · synced ${fmtAgo(fs.last_sync)}` : ""}`);
+    if (fs.note) out += line("muted", esc(fs.note));
+    if (fs.error) out += line("err", esc(fs.error));
+    return out;
   }
 
   function render() {
@@ -341,6 +374,10 @@
   $("#settings-form").onsubmit = async (ev) => {
     ev.preventDefault();
     try { await api("PUT", "/api/v1/settings", { public_host: ev.target.public_host.value.trim() }); toast("Settings saved"); refresh(); } catch (e) { fail(e); }
+  };
+  $("#firewall-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try { await api("PUT", "/api/v1/settings", { firewall: ev.target.firewall.value }); toast("Firewall setting saved"); refresh(); } catch (e) { fail(e); }
   };
   $("#password-form").onsubmit = async (ev) => {
     ev.preventDefault();

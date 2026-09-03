@@ -19,6 +19,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/Ruben-C/SpawnRelay/internal/firewall"
 	"github.com/Ruben-C/SpawnRelay/internal/store"
 )
 
@@ -252,21 +253,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	var out store.Settings
 	s.store.View(func(st *store.State) { out = st.Settings })
+	mode := out.Firewall
+	if mode == "" {
+		mode = firewall.ModeAuto
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"public_host":           out.PublicHost,
 		"detected_public_host":  s.detectedHost,
 		"effective_public_host": s.PublicHost(),
+		"firewall":              mode,
+		"firewall_modes":        firewall.Modes,
+		"firewall_status":       s.firewall.Status(),
 	})
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		PublicHost *string `json:"public_host"`
+		Firewall   *string `json:"firewall"`
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
 	var newHost string
+	firewallChanged := false
 	err := s.store.Update(func(st *store.State) error {
 		if in.PublicHost != nil {
 			h := strings.TrimSpace(*in.PublicHost)
@@ -274,6 +284,17 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("%w: public_host must be a hostname or IP address", store.ErrValidation)
 			}
 			st.Settings.PublicHost = h
+		}
+		if in.Firewall != nil {
+			m := strings.ToLower(strings.TrimSpace(*in.Firewall))
+			if m == "" {
+				m = firewall.ModeAuto
+			}
+			if !firewall.ValidMode(m) {
+				return fmt.Errorf("%w: firewall must be one of %s", store.ErrValidation, strings.Join(firewall.Modes, ", "))
+			}
+			firewallChanged = st.Settings.Firewall != m
+			st.Settings.Firewall = m
 		}
 		newHost = st.Settings.PublicHost
 		return nil
@@ -283,6 +304,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setPublicHost(newHost)
+	if firewallChanged {
+		s.log.Info("firewall mode changed", "by", principalFrom(r).Name)
+		s.firewall.Sync(r.Context())
+	}
 	s.handleGetSettings(w, r)
 }
 
@@ -468,6 +493,9 @@ func (s *Server) handleDeleteClient(w http.ResponseWriter, r *http.Request) {
 		s.tunnel.Remove(fid)
 	}
 	s.tunnel.DisconnectClient(id, "client deleted")
+	if len(removedForwards) > 0 {
+		s.firewall.Sync(r.Context())
+	}
 	s.log.Info("client deleted", "client", name, "client_id", id, "forwards_removed", len(removedForwards), "by", principalFrom(r).Name)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "forwards_removed": len(removedForwards)})
 }
@@ -498,19 +526,20 @@ func (s *Server) handleRotateClientToken(w http.ResponseWriter, r *http.Request)
 // ---- forwards ------------------------------------------------------------
 
 type forwardOut struct {
-	ID         string       `json:"id"`
-	ClientID   string       `json:"client_id"`
-	ClientName string       `json:"client_name"`
-	Name       string       `json:"name"`
-	Protocol   string       `json:"protocol"`
-	PublicPort int          `json:"public_port"`
-	PublicAddr string       `json:"public_addr"`
-	TargetHost string       `json:"target_host"`
-	TargetPort int          `json:"target_port"`
-	Enabled    bool         `json:"enabled"`
-	CreatedAt  time.Time    `json:"created_at"`
-	UpdatedAt  time.Time    `json:"updated_at"`
-	Stats      ForwardStats `json:"stats"`
+	ID         string          `json:"id"`
+	ClientID   string          `json:"client_id"`
+	ClientName string          `json:"client_name"`
+	Name       string          `json:"name"`
+	Protocol   string          `json:"protocol"`
+	PublicPort int             `json:"public_port"`
+	PublicAddr string          `json:"public_addr"`
+	TargetHost string          `json:"target_host"`
+	TargetPort int             `json:"target_port"`
+	Enabled    bool            `json:"enabled"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+	Stats      ForwardStats    `json:"stats"`
+	Firewall   ForwardFirewall `json:"firewall"`
 }
 
 func (s *Server) forwardOut(st *store.State, f *store.Forward) forwardOut {
@@ -523,6 +552,7 @@ func (s *Server) forwardOut(st *store.State, f *store.Forward) forwardOut {
 		PublicPort: f.PublicPort, PublicAddr: net.JoinHostPort(s.PublicHost(), strconv.Itoa(f.PublicPort)),
 		TargetHost: f.TargetHost, TargetPort: f.TargetPort, Enabled: f.Enabled,
 		CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt, Stats: s.tunnel.ForwardStats(f.ID),
+		Firewall: s.firewall.ForwardState(f),
 	}
 }
 
@@ -631,6 +661,8 @@ func (s *Server) handleCreateForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.tunnel.NotifyForwards(f.ClientID)
+	s.firewall.Sync(r.Context())
+	out.Firewall = s.firewall.ForwardState(f)
 	s.log.Info("forward created", "forward", f.Name, "protocol", f.Protocol, "public_port", f.PublicPort, "target", f.Target(), "by", principalFrom(r).Name)
 	writeJSON(w, http.StatusCreated, out)
 }
@@ -697,6 +729,8 @@ func (s *Server) handleUpdateForward(w http.ResponseWriter, r *http.Request) {
 	if oldClient != updated.ClientID {
 		s.tunnel.NotifyForwards(oldClient)
 	}
+	s.firewall.Sync(r.Context())
+	out.Firewall = s.firewall.ForwardState(&updated)
 	s.log.Info("forward updated", "forward", updated.Name, "protocol", updated.Protocol, "public_port", updated.PublicPort, "target", updated.Target(), "enabled", updated.Enabled, "by", principalFrom(r).Name)
 	writeJSON(w, http.StatusOK, out)
 }
@@ -725,6 +759,7 @@ func (s *Server) handleDeleteForward(w http.ResponseWriter, r *http.Request) {
 	}
 	s.tunnel.Remove(id)
 	s.tunnel.NotifyForwards(removed.ClientID)
+	s.firewall.Sync(r.Context())
 	s.log.Info("forward deleted", "forward", removed.Name, "public_port", removed.PublicPort, "by", principalFrom(r).Name)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
