@@ -59,6 +59,8 @@
   const fmtBytes = (n) => { if (!n) return "0 B"; const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return `${n.toFixed(i ? 1 : 0)} ${u[i]}`; };
   const fmtAgo = (iso) => { if (!iso) return "never"; const s = Math.max(0, (Date.now() - new Date(iso)) / 1000); if (s < 60) return "just now"; if (s < 3600) return `${Math.floor(s / 60)} min ago`; if (s < 86400) return `${Math.floor(s / 3600)} h ago`; return `${Math.floor(s / 86400)} d ago`; };
   const fmtDur = (sec) => { if (sec < 3600) return `${Math.floor(sec / 60)}m`; if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`; return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`; };
+  const cap = (t) => t ? t[0].toUpperCase() + t.slice(1) : "";
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const badge = (proto) => `<span class="badge ${esc(proto)}">${esc(proto === "both" ? "TCP+UDP" : proto.toUpperCase())}</span>`;
   const fwLine = (fw) => {
     if (!fw) return "";
@@ -69,6 +71,12 @@
       case "error": return `<div class="subtle err" title="${esc(fw.error || "")}">firewall: error</div>`;
       default: return "";
     }
+  };
+  const fwMeta = (fw) => {
+    if (!fw) return `<span><span class="k">Firewall</span><span class="v muted">not managed</span></span>`;
+    const v = { open: '<span class="v ok">open</span>', existing: '<span class="v ok" title="An existing firewall rule already allows this port; SpawnRelay left it alone.">open (existing rule)</span>',
+      closed: '<span class="v muted">closed</span>', error: `<span class="v err" title="${esc(fw.error || "")}">error</span>` }[fw.state];
+    return v ? `<span><span class="k">Firewall</span>${v}</span>` : "";
   };
 
   // ---- views --------------------------------------------------------------
@@ -82,7 +90,7 @@
     badge.hidden = false;
     if (remember.get("sr.updateToast") !== su.version) {
       remember.set("sr.updateToast", su.version);
-      toast(`SpawnRelay ${su.version} is available — open Settings to update`);
+      toast(`SpawnRelay ${su.version} is available. Open Settings to update.`);
     }
   }
 
@@ -91,10 +99,10 @@
     $("#server-host").textContent = s.public_host;
     updateIndicator(s.server_update);
     $("#stats").innerHTML = `
-      <div class="stat"><div class="label">Clients online</div><div class="value">${s.clients_online} <span class="muted">/ ${s.clients_total}</span></div></div>
-      <div class="stat"><div class="label">Port forwards</div><div class="value">${s.forward_groups_total} <span class="muted small">${s.forwards_total} port${s.forwards_total === 1 ? "" : "s"}</span></div></div>
-      <div class="stat"><div class="label">Tunnel endpoint</div><div class="value mono copy" data-copy="${esc(s.tunnel_addr)}" title="Click to copy">${esc(s.tunnel_addr)}</div></div>
-      <div class="stat"><div class="label">Uptime</div><div class="value">${fmtDur(s.uptime_seconds)} <span class="muted small">v${esc(s.version)}</span></div></div>`;
+      <div class="stat"><div class="label">Clients online</div><div class="value">${s.clients_online} <span class="sub">of ${s.clients_total}</span></div></div>
+      <div class="stat"><div class="label">Port forwards</div><div class="value">${s.forward_groups_total} <span class="sub">${plural(s.forwards_total, "port")}</span></div></div>
+      <div class="stat"><div class="label">Tunnel endpoint</div><div class="value mono"><span class="copy" data-copy="${esc(s.tunnel_addr)}" title="Click to copy">${esc(s.tunnel_addr)}</span></div></div>
+      <div class="stat"><div class="label">Relay uptime</div><div class="value">${fmtDur(s.uptime_seconds)} <span class="sub">${esc(s.version)}</span></div></div>`;
   }
 
   function versionCell(c) {
@@ -107,7 +115,7 @@
     if (l) {
       if (l.state === "pending") out += `<div class="subtle" title="${esc(l.detail || "")}">updating to ${esc(l.target_version)}: ${esc(l.detail || "requested")}</div>`;
       else if (l.state === "failed") out += `<div class="subtle err" title="${esc(l.detail || "")}">update failed: ${esc(l.detail || "")}</div>`;
-      else if (l.state === "done") out += `<div class="subtle ok">${esc(l.detail || "updated")} · ${fmtAgo(l.updated_at)}</div>`;
+      else if (l.state === "done") out += `<div class="subtle ok">${esc(l.detail || "updated")}, ${fmtAgo(l.updated_at)}</div>`;
     }
     return out;
   }
@@ -119,31 +127,50 @@
     btn.textContent = `Update ${outdated} outdated client${outdated === 1 ? "" : "s"}`;
     const rows = state.clients.map((c) => `
       <tr>
-        <td><span class="dot ${c.status.online ? "on" : "off"}"></span>${c.status.online ? "Online" : "Offline"}</td>
-        <td><strong>${esc(c.name)}</strong><div class="subtle">${esc(c.hostname || "not connected yet")}${c.os ? ` · ${esc(c.os)}/${esc(c.arch)}` : ""}</div></td>
+        <td><strong>${esc(c.name)}</strong><div class="cell-sub">${c.hostname ? `${esc(c.hostname)}${c.os ? `, ${esc(c.os)}/${esc(c.arch)}` : ""}` : "Not connected yet"}</div></td>
+        <td><span class="dot ${c.status.online ? "on" : "off"}"></span>${c.status.online ? "Online" : "Offline"}<div class="cell-sub">${c.status.online ? `since ${fmtAgo(c.status.connected_at)}` : c.last_seen_at ? `last seen ${fmtAgo(c.last_seen_at)}` : "never connected"}</div></td>
         <td>${versionCell(c)}</td>
         <td class="mono">${esc(c.status.online ? c.status.remote_addr : c.last_addr || "—")}</td>
-        <td>${c.status.online ? `since ${fmtAgo(c.status.connected_at)}` : fmtAgo(c.last_seen_at)}</td>
-        <td>${c.forward_group_count}</td>
+        <td class="num">${c.forward_group_count}</td>
         <td class="actions">
-          ${c.update && c.update.available ? `<button class="btn small primary" data-action="update-client" data-id="${c.id}">Update</button>` : ""}
-          <button class="btn small ${c.update && c.update.available ? "" : "primary"}" data-action="install" data-id="${c.id}">Install</button>
-          <button class="btn small" data-action="new-forward" data-client="${c.id}">+ Forward</button>
-          <button class="btn small" data-action="rename-client" data-id="${c.id}">Rename</button>
-          <button class="btn small" data-action="rotate" data-id="${c.id}">Rotate token</button>
-          <button class="btn small danger" data-action="delete-client" data-id="${c.id}">Delete</button>
+          <div class="btn-row">
+            ${c.update && c.update.available ? `<button class="btn small primary" data-action="update-client" data-id="${c.id}">Update</button>` : ""}
+            <button class="btn small ${c.update && c.update.available ? "" : "primary"}" data-action="install" data-id="${c.id}">Install</button>
+            <button class="btn small" data-action="new-forward" data-client="${c.id}">Add forward</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn small ghost" data-action="rename-client" data-id="${c.id}">Rename</button>
+            <button class="btn small ghost" data-action="rotate" data-id="${c.id}">Rotate token</button>
+            <button class="btn small ghost danger" data-action="delete-client" data-id="${c.id}">Delete</button>
+          </div>
         </td>
       </tr>`).join("");
     $("#clients-table").innerHTML = state.clients.length
-      ? `<div class="table-wrap"><table><thead><tr><th>Status</th><th>Name</th><th>Version</th><th>Address</th><th>Seen</th><th>Forwards</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : `<div class="card empty">No clients yet. Click <strong>Add client</strong> to create one and get its install command.</div>`;
+      ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Version</th><th>Address</th><th class="num">Forwards</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="card empty">No clients yet. Add one to get the install command for the machine that runs your game servers.</div>`;
   }
 
   const trafficCell = (st) => {
     st = st || {};
     const active = (st.active_tcp || 0) + (st.active_udp || 0);
-    return `<span title="active connections">${active} active</span><div class="subtle">${st.total_connections || 0} total · ${fmtBytes(st.bytes_in)} in / ${fmtBytes(st.bytes_out)} out</div>`;
+    return `<span title="active connections">${active} active</span><div class="subtle">${st.total_connections || 0} total, ${fmtBytes(st.bytes_in)} in / ${fmtBytes(st.bytes_out)} out</div>`;
   };
+  const trafficMeta = (st) => {
+    st = st || {};
+    const active = (st.active_tcp || 0) + (st.active_udp || 0);
+    return `<span><span class="k">Traffic</span><span class="v">${plural(active, "active connection")}, ${st.total_connections || 0} total</span></span>
+      <span><span class="k">Bytes</span><span class="v">${fmtBytes(st.bytes_in)} in, ${fmtBytes(st.bytes_out)} out</span></span>`;
+  };
+  // One chip per entry of the port spec, coloured by its protocol.
+  function portChips(g) {
+    return g.ports.split(",").map((e) => {
+      e = e.trim(); if (!e) return "";
+      const m = e.match(/^([^/>]+)(?:\/(tcp|udp|both))?(?:>(\d+))?$/);
+      const proto = (m && m[2]) || g.protocol;
+      const text = m ? m[1] + (m[3] ? `>${m[3]}` : "") : e;
+      return `<span class="chip ${esc(proto)}" title="${m && m[3] ? `Relayed to port ${esc(m[3])} on the client` : ""}"><span class="proto">${esc(proto === "both" ? "TCP+UDP" : proto.toUpperCase())}</span>${esc(text)}</span>`;
+    }).join("");
+  }
 
   // A group's problems must show on the collapsed row, not only inside it.
   function groupWarning(g) {
@@ -169,7 +196,7 @@
         <td>${trafficCell(st)}</td>
       </tr>`;
     }).join("");
-    return `<table class="members"><thead><tr><th>Proto</th><th>Public address</th><th>Target</th><th>State</th><th>Firewall</th><th>Traffic</th></tr></thead><tbody>${rows}</tbody></table>`;
+    return `<div class="fwd-members"><table><thead><tr><th>Protocol</th><th>Public address</th><th>Target</th><th>State</th><th>Firewall</th><th>Traffic</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function renderForwards() {
@@ -180,48 +207,49 @@
       const f0 = g.forwards[0];
       const multi = g.forwards.length > 1;
       const open = state.expanded.has(g.id);
-      const portsCell = multi
-        ? `<button class="chevron ${open ? "open" : ""}" data-action="expand-group" data-id="${g.id}" title="${open ? "Hide ports" : "Show ports"}" aria-expanded="${open}"></button><span class="mono">${esc(g.ports)}</span><div class="subtle">${g.forwards.length} ports</div>`
-        : `${badge(f0.protocol)} <span class="mono">${f0.public_port}</span>`;
-      const publicCell = multi
-        ? `<span class="mono">${esc(g.public_host)}</span>${fwLine(g.firewall)}`
-        : `<span class="mono copy" data-copy="${esc(f0.public_addr)}" title="Click to copy">${esc(f0.public_addr)}</span>${fwLine(f0.firewall)}`;
-      const targetCell = multi ? esc(g.target_host) : `${esc(f0.target_host)}:${f0.target_port}`;
-      let row = `<tr>
-        <td><strong>${esc(g.name)}</strong>${g.enabled ? "" : ' <span class="badge off">disabled</span>'} ${groupWarning(g)}</td>
-        <td><span class="dot ${online ? "on" : "off"}"></span>${esc(g.client_name || "?")}</td>
-        <td>${portsCell}</td>
-        <td>${publicCell}</td>
-        <td class="mono">${targetCell}</td>
-        <td>${trafficCell(g.stats)}</td>
-        <td><button class="toggle ${g.enabled ? "on" : ""}" data-action="toggle-forward" data-id="${g.id}" data-enabled="${g.enabled}" title="${g.enabled ? "Disable" : "Enable"}"></button></td>
-        <td class="actions">
-          <button class="btn small" data-action="edit-forward" data-id="${g.id}">Edit</button>
-          <button class="btn small danger" data-action="delete-forward" data-id="${g.id}">Delete</button>
-        </td>
-      </tr>`;
-      if (multi && open) row += `<tr class="sub"><td colspan="8">${memberTable(g)}</td></tr>`;
-      return row;
+      const publicAddr = multi
+        ? `<span class="v mono">${esc(g.public_host)}</span>`
+        : `<span class="v mono copy" data-copy="${esc(f0.public_addr)}" title="Click to copy">${esc(f0.public_addr)}</span>`;
+      const target = multi ? esc(g.target_host) : `${esc(f0.target_host)}:${f0.target_port}`;
+      return `<article class="fwd ${g.enabled ? "" : "disabled"}">
+        <div class="fwd-head">
+          <div class="fwd-title"><h3>${esc(g.name)}</h3>${g.enabled ? "" : '<span class="badge off">disabled</span>'}${groupWarning(g)}</div>
+          <span class="fwd-client"><span class="dot ${online ? "on" : "off"}"></span>${esc(g.client_name || "?")}</span>
+          <div class="actions">
+            <button class="toggle ${g.enabled ? "on" : ""}" data-action="toggle-forward" data-id="${g.id}" data-enabled="${g.enabled}" title="${g.enabled ? "Disable" : "Enable"}" aria-label="${g.enabled ? "Disable forward" : "Enable forward"}"></button>
+            <button class="btn small" data-action="edit-forward" data-id="${g.id}">Edit</button>
+            <button class="btn small ghost danger" data-action="delete-forward" data-id="${g.id}">Delete</button>
+          </div>
+        </div>
+        <div class="fwd-ports">${portChips(g)}${multi ? `<button class="expander ${open ? "open" : ""}" data-action="expand-group" data-id="${g.id}" aria-expanded="${open}">${open ? "Hide" : "Show"} ${plural(g.forwards.length, "port")}</button>` : ""}</div>
+        <div class="fwd-meta">
+          <span><span class="k">Public</span>${publicAddr}</span>
+          <span><span class="k">Target</span><span class="v mono">${target}</span></span>
+          ${fwMeta(multi ? g.firewall : f0.firewall)}
+          ${trafficMeta(g.stats)}
+        </div>
+        ${multi && open ? memberTable(g) : ""}
+      </article>`;
     }).join("");
     $("#forwards-table").innerHTML = state.groups.length
-      ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Client</th><th>Ports</th><th>Public address</th><th>Target</th><th>Traffic</th><th>On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : `<div class="card empty">No forwards yet. ${state.clients.length ? "Click <strong>Add forward</strong> to expose a game server." : "Add a client first, then create a forward for it."}</div>`;
+      ? `<div class="forwards">${rows}</div>`
+      : `<div class="card empty">No forwards yet. ${state.clients.length ? "Add one to expose a game server through the relay." : "Add a client first, then create a forward for it."}</div>`;
   }
 
   function renderTokens() {
     const rows = state.tokens.map((t) => `<tr>
       <td><strong>${esc(t.name)}</strong></td><td class="mono">${esc(t.prefix)}…</td>
       <td>${fmtAgo(t.created_at)}</td><td>${fmtAgo(t.last_used_at)}</td>
-      <td class="actions"><button class="btn small danger" data-action="delete-token" data-id="${t.id}">Revoke</button></td></tr>`).join("");
+      <td class="actions"><button class="btn small ghost danger" data-action="delete-token" data-id="${t.id}">Revoke</button></td></tr>`).join("");
     $("#tokens-table").innerHTML = state.tokens.length
       ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Token</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : `<div class="card empty">No API tokens. Create one to automate forwards from scripts.</div>`;
+      : `<div class="card empty">No API tokens yet. Create one to manage forwards from scripts.</div>`;
   }
 
   function renderSettings() {
     const s = state.status, st = state.settings; if (!s || !st) return;
     $("#settings-form input[name=public_host]").value = st.public_host || "";
-    $("#detected-host").textContent = st.detected_public_host ? `Detected address: ${st.detected_public_host}` : "Could not detect an outbound address; set one explicitly.";
+    $("#detected-host").textContent = st.detected_public_host ? `Detected address: ${st.detected_public_host}` : "No outbound address could be detected. Set one explicitly.";
     const fwSel = $("#firewall-form select[name=firewall]");
     if (document.activeElement !== fwSel) {
       fwSel.innerHTML = (st.firewall_modes || ["auto", "off"]).map((m) => `<option value="${esc(m)}" ${m === st.firewall ? "selected" : ""}>${esc(FW_LABELS[m] || m)}</option>`).join("");
@@ -232,13 +260,13 @@
     renderUpdateCard();
     $("#updates-status").textContent = st.server_version === "dev"
       ? "This server runs a development build; automatic updates are paused until it runs a release version."
-      : `Clients are updated to the server's version (${st.server_version}). Update the server first, then push.`;
+      : `Clients are updated to the server's version, ${st.server_version}. Update the server first, then push.`;
     $("#server-info-list").innerHTML = `
       <dt>Version</dt><dd>${esc(s.version)} (${esc(s.os)}/${esc(s.arch)})</dd>
       <dt>Tunnel</dt><dd class="mono">${esc(s.tunnel_addr)}</dd>
       <dt>Fingerprint</dt><dd class="mono copy" data-copy="${esc(s.tunnel_fingerprint)}" title="Click to copy">${esc(s.tunnel_fingerprint)}</dd>
       <dt>Admin URL</dt><dd class="mono">${esc(s.admin_url)}</dd>
-      <dt>Admin cert</dt><dd>${s.admin_self_signed ? "self-signed (browser warning expected)" : "custom certificate"}</dd>`;
+      <dt>Admin cert</dt><dd>${s.admin_self_signed ? "Self-signed, so browsers show a warning" : "Custom certificate"}</dd>`;
   }
 
   function renderUpdateCard() {
@@ -246,21 +274,21 @@
     if (!u) { el.innerHTML = '<div class="muted">Checking for releases…</div>'; return; }
     const line = (cls, text) => `<div class="${cls}">${text}</div>`;
     let out = line("", `Running <span class="mono">${esc(u.running_version)}</span>`);
-    if (u.latest_version) out += line("", `Latest release <span class="mono">${esc(u.latest_version)}</span>${u.checked_at ? ` <span class="subtle">· checked ${fmtAgo(u.checked_at)}</span>` : ""}`);
+    if (u.latest_version) out += line("", `Latest release <span class="mono">${esc(u.latest_version)}</span>${u.checked_at ? ` <span class="subtle">checked ${fmtAgo(u.checked_at)}</span>` : ""}`);
     if (u.check_error) out += line("warn-text", `Release check failed: ${esc(u.check_error)}`);
     const l = u.last;
     if (state.updating) out += line("warn-text", `Updating… ${esc(l && l.detail || "")}`);
     else if (l) {
       if (l.state === "pending") out += line("warn-text", `Update in progress: ${esc(l.detail || "")}`);
-      else if (l.state === "done") out += line("ok", `Updated from ${esc(l.from)} to ${esc(l.to)} · ${fmtAgo(l.finished_at)}`);
+      else if (l.state === "done") out += line("ok", `Updated from ${esc(l.from)} to ${esc(l.to)}, ${fmtAgo(l.finished_at)}`);
       else out += line("err", `Update to ${esc(l.to)} ${l.state === "rolled_back" ? "rolled back" : "failed"} ${fmtAgo(l.finished_at)}: ${esc(l.detail || "")}`);
     }
     let actions = `<button class="btn small" data-action="check-update" ${state.updating ? "disabled" : ""}>Check now</button>`;
     if (u.available && u.supported && !state.updating) actions += ` <button class="btn small primary" data-action="start-update" data-version="${esc(u.latest_version)}">Update to ${esc(u.latest_version)}</button>`;
     else if (u.available && !u.supported) {
-      out += line("warn-text", esc(u.reason || "This host cannot be updated from the UI."));
+      out += line("warn-text", esc(cap(u.reason) || "This host cannot be updated from the UI."));
       out += `<div class="cmd-block"><div class="cmd-head"><span>Update by hand (as root on the server)</span><button class="btn small ghost" data-copy="${esc(u.install_command)}">Copy</button></div><pre class="cmd">${esc(u.install_command)}</pre></div>`;
-    } else if (!u.available && u.reason) out += line("muted", esc(u.reason));
+    } else if (!u.available && u.reason) out += line("muted", esc(cap(u.reason)));
     el.innerHTML = out + `<div class="form-actions" style="justify-content:flex-start">${actions}</div>`;
   }
 
@@ -289,7 +317,7 @@
     state.updating = false; start();
   }
 
-  const FW_LABELS = { auto: "Automatic (detect ufw, firewalld, nftables or iptables)", off: "Off (do not touch the firewall)", ufw: "ufw", firewalld: "firewalld", nftables: "nftables", iptables: "iptables" };
+  const FW_LABELS = { auto: "Automatic (detect the host firewall)", off: "Off (open ports by hand)", ufw: "ufw", firewalld: "firewalld", nftables: "nftables", iptables: "iptables" };
 
   function fwStatusText(fs) {
     if (!fs) return "";
@@ -301,7 +329,7 @@
     }
     let out = "";
     if (fs.backend === "none") out += line("warn-text", "Agent connected, but no active host firewall was detected. If this VPS uses a cloud security group, open the ports there.");
-    else out += line("ok", `Agent connected · backend: ${esc(fs.backend)}${fs.active ? "" : " (inactive)"} · tunnel, management and every enabled forward port are kept open automatically${fs.last_sync ? ` · synced ${fmtAgo(fs.last_sync)}` : ""}`);
+    else out += line("ok", `Agent connected, managing ${esc(fs.backend)}${fs.active ? "" : " (inactive)"}.${fs.last_sync ? ` Last synced ${fmtAgo(fs.last_sync)}.` : ""}`);
     if (fs.note) out += line("muted", esc(fs.note));
     if (fs.error) out += line("err", esc(fs.error));
     return out;
@@ -353,9 +381,9 @@
   // Presets are port specs, so multi-port games fit the same table.
   const PRESETS = [
     ["Minecraft Java", "25565", "tcp"], ["Minecraft Bedrock", "19132", "udp"], ["Terraria", "7777", "tcp"],
-    ["Valheim", "2456", "udp"], ["Palworld", "8211", "udp"], ["Factorio", "34197", "udp"], ["Rust", "28015", "both"],
-    ["ARK: Survival", "7777", "udp"], ["Counter-Strike 2", "27015", "both"], ["Project Zomboid", "16261", "udp"],
-    ["Enshrouded", "15636", "udp"], ["7 Days to Die", "26900", "both"], ["Satisfactory", "7777", "both"], ["Team Fortress 2", "27015", "both"],
+    ["Valheim", "2456-2457", "udp"], ["Palworld", "8211", "udp"], ["Factorio", "34197", "udp"], ["Rust", "28015", "both"],
+    ["ARK: Survival", "7777-7778/udp, 27015/udp", "udp"], ["Counter-Strike 2", "27015", "both"], ["Project Zomboid", "16261-16262", "udp"],
+    ["Enshrouded", "15636-15637", "udp"], ["7 Days to Die", "26900-26902", "both"], ["Satisfactory", "7777", "both"], ["Team Fortress 2", "27015", "both"],
   ];
 
   function forwardModal(g, presetClient) {
@@ -366,7 +394,7 @@
     openModal(`<h3>${isEdit ? "Edit forward" : "New forward"}</h3>
       <form id="forward-form">
         ${isEdit ? "" : `<label>Game preset (optional) <select name="preset"><option value="">Choose a game to fill in the ports…</option>${presetOpts}</select></label>`}
-        <label>Name <input name="name" value="${esc(g.name)}" placeholder="e.g. Minecraft survival" maxlength="64"></label>
+        <label>Name <input name="name" value="${esc(g.name)}" placeholder="e.g. Minecraft survival" maxlength="64" autocomplete="off"></label>
         <label>Client <select name="client_id" required>${clientOpts}</select></label>
         <div class="row">
           <label>Default protocol <select name="protocol">
@@ -406,7 +434,7 @@
     const isEdit = !!c;
     openModal(`<h3>${isEdit ? "Rename client" : "New client"}</h3>
       <form id="client-form">
-        <label>Name <input name="name" required maxlength="64" value="${esc(c ? c.name : "")}" placeholder="e.g. basement-pc"></label>
+        <label>Name <input name="name" required maxlength="64" value="${esc(c ? c.name : "")}" placeholder="e.g. basement-pc" autocomplete="off"></label>
         <div class="form-actions"><button class="btn" type="button" data-modal="close">Cancel</button><button class="btn primary" type="submit">${isEdit ? "Save" : "Create"}</button></div>
       </form>`);
     $("#client-form").onsubmit = async (ev) => {
@@ -422,7 +450,7 @@
   function tokenModal() {
     openModal(`<h3>Create API token</h3>
       <form id="token-form">
-        <label>Name <input name="name" required maxlength="64" placeholder="e.g. panel-automation"></label>
+        <label>Name <input name="name" required maxlength="64" placeholder="e.g. panel-automation" autocomplete="off"></label>
         <div class="form-actions"><button class="btn" type="button" data-modal="close">Cancel</button><button class="btn primary" type="submit">Create</button></div>
       </form>`);
     $("#token-form").onsubmit = async (ev) => {
@@ -431,7 +459,7 @@
         const t = await api("POST", "/api/v1/tokens", { name: $("#token-form input[name=name]").value.trim() });
         const example = `curl ${state.status.admin_self_signed ? "-k " : ""}-H "Authorization: Bearer ${t.token}" ${state.status.admin_url}/api/v1/forwards`;
         openModal(`<h3>Token created</h3>
-          <p class="muted">Copy it now, it will not be shown again.</p>
+          <p class="muted">Copy it now. It will not be shown again.</p>
           <div class="cmd-block"><div class="cmd-head"><span>Token</span><button class="btn small ghost" data-copy="${esc(t.token)}">Copy</button></div><pre class="cmd">${esc(t.token)}</pre></div>
           <div class="cmd-block"><div class="cmd-head"><span>Example</span><button class="btn small ghost" data-copy="${esc(example)}">Copy</button></div><pre class="cmd">${esc(example)}</pre></div>
           <div class="form-actions"><button class="btn primary" data-modal="close">Done</button></div>`);
