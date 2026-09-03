@@ -79,7 +79,7 @@ if [ "$use_systemd" = "1" ]; then
 fi
 
 mkdir -p "$CONF_DIR"
-umask 077
+(umask 077; touch "${CONF_DIR}/client.env")
 cat >"${CONF_DIR}/client.env" <<ENV
 # SpawnRelay client configuration (generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
 SPAWNRELAY_SERVER=${SERVER}
@@ -123,8 +123,11 @@ PrivateTmp=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
+  chmod 0644 /etc/systemd/system/spawnrelay-client.service
   systemctl daemon-reload
-  systemctl enable --now spawnrelay-client.service
+  systemctl enable spawnrelay-client.service >/dev/null 2>&1 || true
+  # "enable --now" would leave an already-running old client untouched.
+  systemctl restart spawnrelay-client.service
   sleep 1
   systemctl --no-pager --lines=5 status spawnrelay-client.service || true
   log "service installed. Logs: journalctl -u spawnrelay-client -f"

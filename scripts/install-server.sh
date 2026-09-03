@@ -90,7 +90,7 @@ if [ -z "$PUBLIC_HOST" ]; then
   PUBLIC_HOST="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
 fi
 if [ ! -f "$CONF_DIR/server.env" ]; then
-  umask 077
+  (umask 077; touch "$CONF_DIR/server.env")
   cat >"$CONF_DIR/server.env" <<ENV
 # SpawnRelay server configuration. Restart with: systemctl restart spawnrelay-server
 SPAWNRELAY_DATA_DIR=${DATA_DIR}
@@ -154,6 +154,7 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 UNIT
+chmod 0644 /etc/systemd/system/spawnrelay-firewall.service /etc/systemd/system/spawnrelay-server.service
 systemctl daemon-reload
 systemctl enable --now spawnrelay-firewall.service
 systemctl restart spawnrelay-firewall.service
