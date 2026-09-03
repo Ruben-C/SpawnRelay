@@ -74,7 +74,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${BIN_DIR}/spawnrelay client --env-file ${CONF_DIR}/client.env
+# systemd reads the config as root before dropping to the dynamic user, so
+# client.env can stay mode 0600.
+EnvironmentFile=${CONF_DIR}/client.env
+ExecStart=${BIN_DIR}/spawnrelay client
 Restart=always
 RestartSec=3
 DynamicUser=yes
