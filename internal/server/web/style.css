@@ -90,6 +90,8 @@ td.wrap { white-space: normal; }
 .badge.udp { color: #fcd34d; border-color: #4d3b12; }
 .badge.both { color: #c4b5fd; border-color: #3b2f63; }
 .badge.off { color: var(--warn); border-color: #4d3b12; }
+.badge.warn { color: #071a1a; background: var(--warn); border-color: var(--warn); }
+.section-actions { display: flex; gap: .5rem; align-items: center; }
 .copy { cursor: pointer; border-bottom: 1px dashed var(--muted); }
 .copy:hover { color: var(--accent); border-color: var(--accent); }
 .subtle { color: var(--muted); font-size: .82rem; }

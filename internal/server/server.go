@@ -119,6 +119,12 @@ func New(cfg Config) (*Server, error) {
 		NextProtos:   []string{"spawnrelay/1"},
 	}
 	s.tunnel = NewTunnel(st, tunnelTLS, cfg.Version, s.log)
+	s.tunnel.binary = s.binaryPath
+	s.tunnel.autoUpdate = func() bool {
+		var on bool
+		st.View(func(state *store.State) { on = state.Settings.AutoUpdateClients })
+		return on
+	}
 
 	// Admin certificate: user-supplied, or self-signed and regenerated yearly.
 	if cfg.AdminCert != "" || cfg.AdminKey != "" {

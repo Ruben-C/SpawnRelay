@@ -115,6 +115,9 @@ type Settings struct {
 	// Firewall is the host firewall management mode: "auto" (default when
 	// empty), "off", or a specific backend (ufw, firewalld, nftables, iptables).
 	Firewall string `json:"firewall,omitempty"`
+	// AutoUpdateClients pushes the server's version to clients that connect
+	// with a different one.
+	AutoUpdateClients bool `json:"auto_update_clients,omitempty"`
 }
 
 // State is the on-disk document.

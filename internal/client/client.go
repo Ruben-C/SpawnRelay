@@ -26,6 +26,7 @@ type Config struct {
 	Server      string // host:port of the relay's tunnel listener
 	Token       string // client token issued by the server
 	Fingerprint string // pinned "sha256:..." of the tunnel certificate; empty = system CA verification
+	AllowUpdate bool   // install updates pushed by the server (see update.go)
 	Version     string
 	Logger      *slog.Logger
 }
@@ -50,6 +51,7 @@ func Run(ctx context.Context, cfg Config) error {
 	} else {
 		cfg.Logger.Warn("no fingerprint configured; verifying server certificate with system CAs")
 	}
+	cleanupUpdateLeftovers(cfg.Logger)
 
 	backoff := time.Second
 	for {
@@ -99,13 +101,13 @@ func runOnce(ctx context.Context, cfg Config, onConnected func()) error {
 
 	dialer := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 15 * time.Second}, Config: tlsCfg}
 	log.Info("connecting to relay", "server", cfg.Server)
-	conn, err := dialer.DialContext(ctx, "tcp", cfg.Server)
+	tlsConn, err := dialer.DialContext(ctx, "tcp", cfg.Server)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	sess, err := yamux.Client(conn, yamuxConfig())
+	sess, err := yamux.Client(tlsConn, yamuxConfig())
 	if err != nil {
-		conn.Close()
+		tlsConn.Close()
 		return fmt.Errorf("mux: %w", err)
 	}
 	defer sess.Close()
@@ -118,7 +120,7 @@ func runOnce(ctx context.Context, cfg Config, onConnected func()) error {
 	_ = ctrl.SetDeadline(time.Now().Add(15 * time.Second))
 	if err := protocol.WriteJSONLine(ctrl, protocol.Hello{
 		Version: protocol.Version, Token: cfg.Token, Hostname: hostname,
-		OS: runtime.GOOS, Arch: runtime.GOARCH, ClientVersion: cfg.Version,
+		OS: runtime.GOOS, Arch: runtime.GOARCH, ClientVersion: cfg.Version, AllowUpdate: cfg.AllowUpdate,
 	}); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
@@ -133,6 +135,7 @@ func runOnce(ctx context.Context, cfg Config, onConnected func()) error {
 	_ = ctrl.SetDeadline(time.Time{})
 	onConnected()
 	log.Info("connected to relay", "client_id", resp.ClientID, "client_name", resp.ClientName, "server_version", resp.ServerVersion)
+	c := &conn{cfg: cfg, log: log, sess: sess, ctrl: ctrl}
 
 	// Control reader: log forward announcements; any error ends the session.
 	go func() {
@@ -150,6 +153,12 @@ func runOnce(ctx context.Context, cfg Config, onConnected func()) error {
 				for _, f := range msg.Forwards {
 					log.Info("forward active", "name", f.Name, "protocol", f.Protocol, "public_port", f.PublicPort, "target", f.Target)
 				}
+			case "update":
+				if msg.Update == nil {
+					log.Warn("update message without details")
+					continue
+				}
+				go c.runUpdate(ctx, *msg.Update)
 			case "shutdown":
 				log.Info("server asked us to disconnect", "message", msg.Message)
 				return

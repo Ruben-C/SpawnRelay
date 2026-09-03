@@ -85,6 +85,26 @@ immediately. Give players `relay.example.com:<public port>`.
 Forwards can be edited, disabled/enabled and deleted at any time. Traffic
 counters and active connection counts are shown live.
 
+## Updating
+
+**Server:** re-run the server installer. It keeps your configuration and
+state, replaces the binary, refreshes the client binaries it serves and
+restarts the services.
+
+**Clients:** the **Clients** tab shows every client's version. When a client
+runs a different version than the server, an **Update** button appears next
+to it, and **Update outdated clients** pushes to all of them at once. The
+client downloads the new binary through its own pinned tunnel, verifies the
+SHA-256 and the version it reports, replaces itself and restarts; a few
+seconds later it is back online on the new version and the row shows the
+result. Turn on **Settings → Client updates → Automatically update clients**
+to have this happen whenever a client connects with an older version.
+
+Clients installed before v0.3.0 need one manual reinstall (run their install
+command again); after that they take pushed updates. To keep a client on a
+fixed version, set `SPAWNRELAY_ALLOW_UPDATE=0` in its `client.env` and restart
+it.
+
 ## Host firewall
 
 SpawnRelay manages the relay's host firewall for you across the whole
@@ -150,8 +170,9 @@ Server flags (each also readable from the environment variable in brackets):
 | `--reset-admin-password` | – | generate a new admin password at start (written to `<data-dir>/initial-admin-password`) |
 | `--log-level`, `--log-format` | `info`, `text` | logging |
 
-Client flags: `--server host:port`, `--token`, `--fingerprint`, `--env-file`
-(`[SPAWNRELAY_SERVER]`, `[SPAWNRELAY_TOKEN]`, `[SPAWNRELAY_FINGERPRINT]`).
+Client flags: `--server host:port`, `--token`, `--fingerprint`, `--env-file`,
+`--allow-update` (default true) (`[SPAWNRELAY_SERVER]`, `[SPAWNRELAY_TOKEN]`,
+`[SPAWNRELAY_FINGERPRINT]`, `[SPAWNRELAY_ALLOW_UPDATE]`).
 
 Firewall agent flags (`spawnrelay firewall-agent`, run as root): `--data-dir`,
 `--socket` (`[SPAWNRELAY_FIREWALL_SOCKET]`), `--log-level`, `--log-format`.

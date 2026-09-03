@@ -41,7 +41,10 @@
     <section id="tab-clients" class="tab">
       <div class="section-head">
         <h2>Clients</h2>
-        <button class="btn primary" data-action="new-client">+ Add client</button>
+        <div class="section-actions">
+          <button class="btn" id="update-all" data-action="update-all" hidden>Update outdated clients</button>
+          <button class="btn primary" data-action="new-client">+ Add client</button>
+        </div>
       </div>
       <p class="muted">A client is a machine running your game servers. Add one, then run its install command on that machine.</p>
       <div id="clients-table"></div>
@@ -80,6 +83,13 @@
           <p class="muted">SpawnRelay can open and close ports in this server's firewall by itself: the tunnel port, the management port and every enabled forward. Disabled or deleted forwards are closed again. Only rules tagged <span class="mono">spawnrelay:</span> are ever touched.</p>
           <label>Mode <select name="firewall"></select></label>
           <div class="small" id="firewall-status"></div>
+          <button class="btn primary" type="submit">Save</button>
+        </form>
+        <form id="updates-form" class="card">
+          <h3>Client updates</h3>
+          <p class="muted">The Clients tab shows each client's version and lets you push the server's version to it. The client fetches the binary through its own pinned tunnel, verifies the checksum and version, and restarts itself.</p>
+          <label class="check"><input type="checkbox" name="auto_update_clients"> Automatically update clients that connect with a different version</label>
+          <div class="muted small" id="updates-status"></div>
           <button class="btn primary" type="submit">Save</button>
         </form>
         <form id="password-form" class="card">

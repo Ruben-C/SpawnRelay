@@ -27,6 +27,7 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 # Stop a previous instance so the binary can be replaced.
 schtasks /End /TN $TaskName 2>$null | Out-Null
 Get-Process spawnrelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Remove-Item -Force -ErrorAction SilentlyContinue "$Exe.old"
 
 Log "downloading spawnrelay for windows/$arch from $AdminUrl"
 $url = "$AdminUrl/dl/spawnrelay_windows_$arch.exe"
@@ -43,6 +44,8 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 SPAWNRELAY_SERVER=$Server
 SPAWNRELAY_TOKEN=$Token
 SPAWNRELAY_FINGERPRINT=$Fingerprint
+# Accept updates pushed from the relay's management interface (0 to refuse)
+SPAWNRELAY_ALLOW_UPDATE=1
 "@ | Set-Content -Path $EnvFile -Encoding ASCII
 Log "wrote $EnvFile"
 

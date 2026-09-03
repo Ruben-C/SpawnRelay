@@ -52,6 +52,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/clients/{id}", s.requireAuth(s.handleUpdateClient))
 	mux.HandleFunc("DELETE /api/v1/clients/{id}", s.requireAuth(s.handleDeleteClient))
 	mux.HandleFunc("POST /api/v1/clients/{id}/rotate-token", s.requireAuth(s.handleRotateClientToken))
+	mux.HandleFunc("POST /api/v1/clients/{id}/update", s.requireAuth(s.handleUpdateClientBinary))
+	mux.HandleFunc("POST /api/v1/clients/update-all", s.requireAuth(s.handleUpdateAllClients))
 	mux.HandleFunc("GET /api/v1/forwards", s.requireAuth(s.handleListForwards))
 	mux.HandleFunc("POST /api/v1/forwards", s.requireAuth(s.handleCreateForward))
 	mux.HandleFunc("GET /api/v1/forwards/{id}", s.requireAuth(s.handleGetForward))
@@ -264,13 +266,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"firewall":              mode,
 		"firewall_modes":        firewall.Modes,
 		"firewall_status":       s.firewall.Status(),
+		"auto_update_clients":   out.AutoUpdateClients,
+		"server_version":        s.cfg.Version,
 	})
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		PublicHost *string `json:"public_host"`
-		Firewall   *string `json:"firewall"`
+		PublicHost        *string `json:"public_host"`
+		Firewall          *string `json:"firewall"`
+		AutoUpdateClients *bool   `json:"auto_update_clients"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -295,6 +300,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			firewallChanged = st.Settings.Firewall != m
 			st.Settings.Firewall = m
+		}
+		if in.AutoUpdateClients != nil {
+			st.Settings.AutoUpdateClients = *in.AutoUpdateClients
 		}
 		newHost = st.Settings.PublicHost
 		return nil
@@ -328,6 +336,25 @@ type clientOut struct {
 	Status        ClientStatus `json:"status"`
 	ForwardCount  int          `json:"forward_count"`
 	Install       installInfo  `json:"install"`
+	Update        updateOut    `json:"update"`
+}
+
+// updateOut is the client's update situation as shown in the UI.
+type updateOut struct {
+	Available     bool          `json:"available"`        // an update can be pushed right now
+	Reason        string        `json:"reason,omitempty"` // why not
+	ServerVersion string        `json:"server_version"`   // what a push would install
+	Last          *ClientUpdate `json:"last,omitempty"`   // most recent attempt
+	AllowUpdate   bool          `json:"allow_update"`     // the client accepts pushed updates (only known while online)
+}
+
+func (s *Server) updateOut(c *store.Client) updateOut {
+	ok, reason := s.tunnel.UpdateAvailability(c.ID)
+	out := updateOut{Available: ok, Reason: reason, ServerVersion: s.cfg.Version, Last: s.tunnel.UpdateStatus(c.ID)}
+	if sess := s.tunnel.session(c.ID); sess != nil {
+		out.AllowUpdate = sess.Hello.AllowUpdate
+	}
+	return out
 }
 
 type installInfo struct {
@@ -358,7 +385,7 @@ func (s *Server) clientOut(c *store.Client, forwardCount int) clientOut {
 		ID: c.ID, Name: c.Name, Token: c.Token, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 		LastSeenAt: c.LastSeenAt, LastAddr: c.LastAddr, Hostname: c.Hostname, OS: c.OS, Arch: c.Arch,
 		ClientVersion: c.ClientVersion, Status: s.tunnel.ClientStatus(c.ID), ForwardCount: forwardCount,
-		Install: s.installInfo(c.Token),
+		Install: s.installInfo(c.Token), Update: s.updateOut(c),
 	}
 }
 
@@ -521,6 +548,58 @@ func (s *Server) handleRotateClientToken(w http.ResponseWriter, r *http.Request)
 	out.Status = ClientStatus{}
 	s.log.Info("client token rotated", "client", out.Name, "client_id", id, "by", principalFrom(r).Name)
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateClientBinary(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var out *clientOut
+	s.store.View(func(st *store.State) {
+		if c := st.ClientByID(id); c != nil {
+			o := s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+			out = &o
+		}
+	})
+	if out == nil {
+		writeError(w, http.StatusNotFound, "client not found")
+		return
+	}
+	if err := s.tunnel.PushUpdate(id, false); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	s.log.Info("client update requested", "client", out.Name, "client_id", id, "by", principalFrom(r).Name)
+	s.store.View(func(st *store.State) {
+		if c := st.ClientByID(id); c != nil {
+			o := s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+			out = &o
+		}
+	})
+	writeJSON(w, http.StatusAccepted, out)
+}
+
+func (s *Server) handleUpdateAllClients(w http.ResponseWriter, r *http.Request) {
+	type skipped struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	}
+	var ids [][2]string
+	s.store.View(func(st *store.State) {
+		for _, c := range st.Clients {
+			ids = append(ids, [2]string{c.ID, c.Name})
+		}
+	})
+	requested := []string{}
+	skips := []skipped{}
+	for _, c := range ids {
+		if err := s.tunnel.PushUpdate(c[0], false); err != nil {
+			skips = append(skips, skipped{ID: c[0], Name: c[1], Reason: err.Error()})
+			continue
+		}
+		requested = append(requested, c[0])
+	}
+	s.log.Info("update-all requested", "requested", len(requested), "skipped", len(skips), "by", principalFrom(r).Name)
+	writeJSON(w, http.StatusAccepted, map[string]any{"requested": len(requested), "requested_ids": requested, "skipped": skips})
 }
 
 // ---- forwards ------------------------------------------------------------
@@ -879,32 +958,38 @@ func (s *Server) handleInstallScript(name, contentType string) http.HandlerFunc 
 
 var downloadName = regexp.MustCompile(`^spawnrelay_(linux|darwin|windows|freebsd)_(amd64|arm64|arm|386)(\.exe)?$`)
 
-// handleDownload serves client binaries from <data-dir>/bin, falling back to
-// the running executable when the requested platform matches the server's.
-func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+// binaryPath resolves a client binary asset name (spawnrelay_<os>_<arch>[.exe])
+// to a file: a build placed in <data-dir>/bin, or the running executable when
+// the requested platform matches the server's.
+func (s *Server) binaryPath(name string) (string, error) {
 	m := downloadName.FindStringSubmatch(name)
 	if m == nil {
-		http.Error(w, "unknown binary name; expected spawnrelay_<os>_<arch>", http.StatusNotFound)
-		return
+		return "", errors.New("unknown binary name; expected spawnrelay_<os>_<arch>")
 	}
 	goos, goarch := m[1], m[2]
 	path := filepath.Join(s.cfg.DataDir, "bin", name)
 	if _, err := os.Stat(path); err == nil {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", "attachment; filename="+name)
-		http.ServeFile(w, r, path)
-		return
+		return path, nil
 	}
 	if goos == runtime.GOOS && goarch == runtime.GOARCH {
 		if exe, err := os.Executable(); err == nil {
 			if real, err := filepath.EvalSymlinks(exe); err == nil {
-				w.Header().Set("Content-Type", "application/octet-stream")
-				w.Header().Set("Content-Disposition", "attachment; filename="+name)
-				http.ServeFile(w, r, real)
-				return
+				return real, nil
 			}
 		}
 	}
-	http.Error(w, fmt.Sprintf("no binary for %s/%s on this server; place a build at %s", goos, goarch, path), http.StatusNotFound)
+	return "", fmt.Errorf("no binary for %s/%s on this server; place a build at %s", goos, goarch, path)
+}
+
+// handleDownload serves client binaries (see binaryPath).
+func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path, err := s.binaryPath(name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", "attachment; filename="+name)
+	http.ServeFile(w, r, path)
 }

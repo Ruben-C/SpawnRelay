@@ -30,6 +30,13 @@ type Tunnel struct {
 	mu       sync.Mutex
 	sessions map[string]*Session       // by client id
 	runners  map[string]*forwardRunner // by forward id
+	updates  map[string]*ClientUpdate  // by client id; see update.go
+
+	// binary resolves a client binary asset name to a file path (set by Server).
+	binary func(name string) (string, error)
+	// autoUpdate reports whether clients should be updated on connect.
+	autoUpdate func() bool
+	binaries   binaryCache
 }
 
 // Session is a connected client.
@@ -66,7 +73,7 @@ type ForwardStats struct {
 func NewTunnel(st *store.Store, tlsCfg *tls.Config, version string, log *slog.Logger) *Tunnel {
 	return &Tunnel{
 		store: st, log: log, version: version, tlsCfg: tlsCfg, udpIdle: 90 * time.Second,
-		sessions: map[string]*Session{}, runners: map[string]*forwardRunner{},
+		sessions: map[string]*Session{}, runners: map[string]*forwardRunner{}, updates: map[string]*ClientUpdate{},
 	}
 }
 
@@ -212,13 +219,27 @@ func (t *Tunnel) handleConn(raw net.Conn) {
 	t.log.Info("client connected", "client", clientName, "client_id", clientID, "remote", remote, "hostname", hello.Hostname, "os", hello.OS+"/"+hello.Arch, "version", hello.ClientVersion)
 	t.NotifyForwards(clientID)
 
-	// The client never writes on the control stream after Hello, so this
-	// blocks until the stream (or session) goes away.
-	buf := make([]byte, 1)
+	t.noteReconnect(s)
+
+	// Streams the client opens towards us (binary downloads for self-update).
+	go func() {
+		for {
+			st, err := sess.AcceptStream()
+			if err != nil {
+				return
+			}
+			go t.handleClientStream(s, st)
+		}
+	}()
+
+	// Messages from the client (update progress). Old clients never write, so
+	// this simply blocks until the stream or session goes away.
 	for {
-		if _, err := ctrl.Read(buf); err != nil {
+		var msg protocol.ControlMessage
+		if err := protocol.ReadJSONLine(br, &msg); err != nil {
 			break
 		}
+		t.handleClientMessage(s, msg)
 	}
 	t.dropSession(s)
 	t.log.Info("client disconnected", "client", clientName, "client_id", clientID, "remote", remote)

@@ -78,6 +78,14 @@ func envBool(key string) bool {
 	return false
 }
 
+// envBoolDefault reads a boolean environment variable, returning def when unset.
+func envBoolDefault(key string, def bool) bool {
+	if os.Getenv(key) == "" {
+		return def
+	}
+	return envBool(key)
+}
+
 func defaultDataDir() string {
 	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
 		return "/var/lib/spawnrelay"
@@ -236,6 +244,7 @@ func runClient(args []string) error {
 	fs.StringVar(&cfg.Server, "server", envOr("SPAWNRELAY_SERVER", ""), "relay tunnel address host:port [SPAWNRELAY_SERVER]")
 	fs.StringVar(&cfg.Token, "token", envOr("SPAWNRELAY_TOKEN", ""), "client token issued by the relay [SPAWNRELAY_TOKEN]")
 	fs.StringVar(&cfg.Fingerprint, "fingerprint", envOr("SPAWNRELAY_FINGERPRINT", ""), "pinned sha256 fingerprint of the relay's tunnel certificate [SPAWNRELAY_FINGERPRINT]")
+	fs.BoolVar(&cfg.AllowUpdate, "allow-update", envBoolDefault("SPAWNRELAY_ALLOW_UPDATE", true), "install updates pushed by the relay server [SPAWNRELAY_ALLOW_UPDATE]")
 	fs.StringVar(&logLevel, "log-level", envOr("SPAWNRELAY_LOG_LEVEL", "info"), "debug|info|warn|error [SPAWNRELAY_LOG_LEVEL]")
 	fs.StringVar(&logFormat, "log-format", envOr("SPAWNRELAY_LOG_FORMAT", "text"), "text|json [SPAWNRELAY_LOG_FORMAT]")
 	if err := fs.Parse(args); err != nil {

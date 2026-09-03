@@ -8,6 +8,11 @@
 #      the relay's certificate fingerprint (pinned, so the tunnel cannot be
 #      intercepted even though it uses a self-signed certificate)
 #   3. installs and starts a systemd (Linux) or launchd (macOS) service
+#
+# The client accepts updates pushed from the relay's management interface
+# (SPAWNRELAY_ALLOW_UPDATE=1 in client.env; set it to 0 to opt out). On Linux
+# the binary therefore lives in the service's own state directory,
+# /var/lib/spawnrelay-client, which the unprivileged service user can write.
 set -euo pipefail
 
 SERVER="{{.Server}}"
@@ -16,9 +21,10 @@ FINGERPRINT="{{.Fingerprint}}"
 ADMIN_URL="{{.AdminURL}}"
 CURL_FLAGS="{{.CurlFlags}}"
 
-BIN_DIR="${SPAWNRELAY_BIN_DIR:-/usr/local/bin}"
 CONF_DIR="${SPAWNRELAY_CONF_DIR:-/etc/spawnrelay}"
 NO_SERVICE="${SPAWNRELAY_NO_SERVICE:-0}"
+ALLOW_UPDATE="${SPAWNRELAY_ALLOW_UPDATE:-1}"
+SVC_USER=spawnrelay
 
 log() { printf '\033[1;36m[spawnrelay]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[spawnrelay] error:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -39,6 +45,18 @@ case "$os" in linux|darwin|freebsd) ;; *) die "unsupported operating system: $os
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 
+use_systemd=0
+if [ "$os" = "linux" ] && [ "$NO_SERVICE" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+  use_systemd=1
+fi
+if [ -n "${SPAWNRELAY_BIN_DIR:-}" ]; then
+  BIN_DIR="$SPAWNRELAY_BIN_DIR"
+elif [ "$use_systemd" = "1" ]; then
+  BIN_DIR=/var/lib/spawnrelay-client
+else
+  BIN_DIR=/usr/local/bin
+fi
+
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 log "downloading spawnrelay for ${os}/${arch} from ${ADMIN_URL}"
@@ -49,6 +67,16 @@ mkdir -p "$BIN_DIR"
 mv -f "$tmp" "${BIN_DIR}/spawnrelay"
 trap - EXIT
 log "installed ${BIN_DIR}/spawnrelay ($("${BIN_DIR}/spawnrelay" version 2>/dev/null || echo unknown))"
+if [ "$use_systemd" = "1" ]; then
+  if ! id "$SVC_USER" >/dev/null 2>&1; then
+    useradd --system --home-dir "$BIN_DIR" --shell /usr/sbin/nologin "$SVC_USER"
+  fi
+  chown -R "$SVC_USER:$SVC_USER" "$BIN_DIR"
+  chmod 0755 "$BIN_DIR"
+  if [ "$BIN_DIR" != "/usr/local/bin" ] && [ -f /usr/local/bin/spawnrelay ]; then
+    log "note: an older client binary remains at /usr/local/bin/spawnrelay; the service now runs ${BIN_DIR}/spawnrelay"
+  fi
+fi
 
 mkdir -p "$CONF_DIR"
 umask 077
@@ -57,6 +85,8 @@ cat >"${CONF_DIR}/client.env" <<ENV
 SPAWNRELAY_SERVER=${SERVER}
 SPAWNRELAY_TOKEN=${TOKEN}
 SPAWNRELAY_FINGERPRINT=${FINGERPRINT}
+# Accept updates pushed from the relay's management interface (0 to refuse)
+SPAWNRELAY_ALLOW_UPDATE=${ALLOW_UPDATE}
 ENV
 chmod 0600 "${CONF_DIR}/client.env"
 log "wrote ${CONF_DIR}/client.env"
@@ -66,7 +96,7 @@ if [ "$NO_SERVICE" = "1" ]; then
   exit 0
 fi
 
-if [ "$os" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+if [ "$use_systemd" = "1" ]; then
   cat >/etc/systemd/system/spawnrelay-client.service <<UNIT
 [Unit]
 Description=SpawnRelay client (tunnel to ${SERVER})
@@ -74,13 +104,17 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# systemd reads the config as root before dropping to the dynamic user, so
-# client.env can stay mode 0600.
+# systemd reads the config as root before dropping privileges, so client.env
+# can stay mode 0600. The binary lives in the state directory so the service
+# can replace it when the relay pushes an update.
 EnvironmentFile=${CONF_DIR}/client.env
 ExecStart=${BIN_DIR}/spawnrelay client
 Restart=always
 RestartSec=3
-DynamicUser=yes
+User=${SVC_USER}
+Group=${SVC_USER}
+StateDirectory=spawnrelay-client
+ReadWritePaths=${BIN_DIR}
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

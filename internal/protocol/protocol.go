@@ -4,7 +4,14 @@
 // A client opens a single TLS connection to the server's tunnel port and runs
 // a yamux session over it. The first stream the client opens is the control
 // stream: the client sends a Hello, the server answers with a HelloResponse,
-// and afterwards the server pushes newline-delimited ControlMessages.
+// and afterwards the server pushes newline-delimited ControlMessages. The
+// client may send ControlMessages of its own on the same stream (update
+// progress); the server ignores types it does not know.
+//
+// The client may also open streams towards the server: the first line is a
+// ClientRequest. The only request today is "download", which fetches a
+// client binary for self-update; the server answers with a DownloadResponse
+// line followed by the raw file.
 //
 // For every connection that reaches a public port on the server, the server
 // opens a new yamux stream to the client, writes a single StreamHeader line,
@@ -37,6 +44,7 @@ type Hello struct {
 	OS            string `json:"os"`
 	Arch          string `json:"arch"`
 	ClientVersion string `json:"client_version"`
+	AllowUpdate   bool   `json:"allow_update,omitempty"` // the client will install updates pushed by the server
 }
 
 // HelloResponse is the server's answer to Hello.
@@ -48,11 +56,36 @@ type HelloResponse struct {
 	ServerVersion string `json:"server_version,omitempty"`
 }
 
-// ControlMessage is pushed by the server on the control stream.
+// ControlMessage is exchanged on the control stream. Server to client:
+// "forwards", "shutdown", "update". Client to server: "update_status".
 type ControlMessage struct {
-	Type     string        `json:"type"` // "forwards" | "ping" | "shutdown"
+	Type     string        `json:"type"`
 	Message  string        `json:"message,omitempty"`
 	Forwards []ForwardInfo `json:"forwards,omitempty"`
+	Update   *UpdateInfo   `json:"update,omitempty"` // with type "update"
+	Status   string        `json:"status,omitempty"` // with type "update_status": downloading | installing | restarting | failed
+}
+
+// UpdateInfo tells the client which binary to fetch and what to expect.
+type UpdateInfo struct {
+	Version string `json:"version"` // version the new binary must report
+	Name    string `json:"name"`    // asset name, e.g. spawnrelay_linux_amd64
+	Size    int64  `json:"size"`
+	SHA256  string `json:"sha256"` // hex
+}
+
+// ClientRequest is the first line of a stream the client opens to the server.
+type ClientRequest struct {
+	Type string `json:"type"` // "download"
+	Name string `json:"name,omitempty"`
+}
+
+// DownloadResponse precedes the file bytes on a download stream.
+type DownloadResponse struct {
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // ForwardInfo describes one port forward, for the client's information/logs.

@@ -95,6 +95,8 @@ credentials: token management, password change and settings. They return
   "detected_public_host": "203.0.113.5",
   "effective_public_host": "relay.example.com",
   "firewall": "auto",
+  "auto_update_clients": false,
+  "server_version": "v0.3.0",
   "firewall_modes": ["auto", "off", "ufw", "firewalld", "nftables", "iptables"],
   "firewall_status": {
     "mode": "auto",
@@ -116,12 +118,14 @@ detail when present. See [Host firewall](#host-firewall).
 
 #### `PUT /settings` (session only)
 
-Body: any subset of `{"public_host": "relay.example.com", "firewall": "auto"}`.
-An empty `public_host` reverts to the detected address. The public host is
-used in generated install commands and in the `public_addr` of every forward.
-`firewall` must be one of `firewall_modes`; changing it triggers an immediate
-firewall sync. Switching to `off` stops managing the firewall but leaves the
-rules that were already created in place.
+Body: any subset of `{"public_host": "relay.example.com", "firewall": "auto",
+"auto_update_clients": true}`. An empty `public_host` reverts to the detected
+address. The public host is used in generated install commands and in the
+`public_addr` of every forward. `firewall` must be one of `firewall_modes`;
+changing it triggers an immediate firewall sync. Switching to `off` stops
+managing the firewall but leaves the rules that were already created in
+place. `auto_update_clients` pushes the server's version to any client that
+connects with a different one (see [Client updates](#client-updates)).
 
 ### Clients
 
@@ -140,6 +144,12 @@ Client object:
   "hostname": "gamebox", "os": "linux", "arch": "amd64", "client_version": "v1.0.0",
   "status": {"online": true, "connected_at": "…", "remote_addr": "198.51.100.7:51234"},
   "forward_count": 2,
+  "update": {
+    "available": true,
+    "server_version": "v0.3.0",
+    "allow_update": true,
+    "last": {"state": "done", "target_version": "v0.2.0", "detail": "updated to v0.2.0", "requested_at": "…", "updated_at": "…"}
+  },
   "install": {
     "linux":   "curl -fsSL -k https://relay.example.com:8443/install/client.sh?token=sr_c_… | sudo bash",
     "windows": "irm -SkipCertificateCheck 'https://relay.example.com:8443/install/client.ps1?token=sr_c_…' | iex",
@@ -156,6 +166,8 @@ Client object:
 | `PATCH` | `/clients/{id}` | `{"name"}` | rename |
 | `DELETE` | `/clients/{id}` | – | deletes the client and all its forwards, disconnects it |
 | `POST` | `/clients/{id}/rotate-token` | – | issues a new token; the old one stops working and the client is disconnected |
+| `POST` | `/clients/{id}/update` | – | `202` client; pushes the server's version to the connected client, `409` with the reason when it cannot (see below) |
+| `POST` | `/clients/update-all` | – | `202` `{"requested": n, "requested_ids": […], "skipped": [{"id","name","reason"}]}` |
 
 Example:
 
@@ -163,6 +175,36 @@ Example:
 curl -k -H "Authorization: Bearer $SR_TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"basement-pc"}' "$SR/clients"
 ```
+
+### Client updates
+
+The server knows every connected client's version (`client_version`), and it
+serves client binaries for all platforms (`/dl/…`, filled by the server
+installer from the release matching the server). `update.available` is true
+when the client is online, runs a different version than the server, accepts
+pushed updates and a binary for its OS/architecture exists on the server;
+otherwise `update.reason` says why. `update.last` is the most recent attempt:
+
+| `last.state` | Meaning |
+|---|---|
+| `pending` | requested; `detail` follows the client's progress (downloading, installing, restarting) |
+| `done` | the client reconnected running `target_version` |
+| `failed` | the client reported an error in `detail`, reconnected on the old version, or did not answer within 3 minutes |
+
+How a push works: the server sends an `update` message on the control
+stream with the binary name, size and SHA-256. The client downloads it over
+a new stream of the same pinned tunnel (never over the management port),
+refuses it on any size or hash mismatch, runs `<new binary> version` and
+refuses unless it prints the server's version, swaps it into place and
+restarts itself (exec in place on Linux and macOS, a detached child on
+Windows). Players connected through that client are disconnected for a few
+seconds. Clients installed before v0.3.0 must be reinstalled once with their
+install command; after that they accept pushes. Clients can opt out with
+`SPAWNRELAY_ALLOW_UPDATE=0` in their `client.env`.
+
+With `auto_update_clients` on, the server pushes to every client that connects
+with a different version, retrying a failed client at most once an hour.
+Automatic updates are paused while the server runs a `dev` build.
 
 ### Forwards
 

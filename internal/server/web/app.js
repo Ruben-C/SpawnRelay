@@ -80,16 +80,37 @@
       <div class="stat"><div class="label">Uptime</div><div class="value">${fmtDur(s.uptime_seconds)} <span class="muted small">v${esc(s.version)}</span></div></div>`;
   }
 
+  function versionCell(c) {
+    const u = c.update || {};
+    const v = c.client_version ? esc(c.client_version) : '<span class="muted">?</span>';
+    let out = `<span class="mono">${v}</span>`;
+    if (u.available) out += ' <span class="badge warn" title="Server is on ' + esc(u.server_version) + '">outdated</span>';
+    else if (c.status.online && c.client_version && c.client_version !== u.server_version) out += ` <span class="badge off" title="${esc(u.reason || "")}">cannot update</span>`;
+    const l = u.last;
+    if (l) {
+      if (l.state === "pending") out += `<div class="subtle" title="${esc(l.detail || "")}">updating to ${esc(l.target_version)}: ${esc(l.detail || "requested")}</div>`;
+      else if (l.state === "failed") out += `<div class="subtle err" title="${esc(l.detail || "")}">update failed: ${esc(l.detail || "")}</div>`;
+      else if (l.state === "done") out += `<div class="subtle ok">${esc(l.detail || "updated")} · ${fmtAgo(l.updated_at)}</div>`;
+    }
+    return out;
+  }
+
   function renderClients() {
+    const outdated = state.clients.filter((c) => c.update && c.update.available).length;
+    const btn = $("#update-all");
+    btn.hidden = outdated === 0;
+    btn.textContent = `Update ${outdated} outdated client${outdated === 1 ? "" : "s"}`;
     const rows = state.clients.map((c) => `
       <tr>
         <td><span class="dot ${c.status.online ? "on" : "off"}"></span>${c.status.online ? "Online" : "Offline"}</td>
         <td><strong>${esc(c.name)}</strong><div class="subtle">${esc(c.hostname || "not connected yet")}${c.os ? ` · ${esc(c.os)}/${esc(c.arch)}` : ""}</div></td>
+        <td>${versionCell(c)}</td>
         <td class="mono">${esc(c.status.online ? c.status.remote_addr : c.last_addr || "—")}</td>
         <td>${c.status.online ? `since ${fmtAgo(c.status.connected_at)}` : fmtAgo(c.last_seen_at)}</td>
         <td>${c.forward_count}</td>
         <td class="actions">
-          <button class="btn small primary" data-action="install" data-id="${c.id}">Install</button>
+          ${c.update && c.update.available ? `<button class="btn small primary" data-action="update-client" data-id="${c.id}">Update</button>` : ""}
+          <button class="btn small ${c.update && c.update.available ? "" : "primary"}" data-action="install" data-id="${c.id}">Install</button>
           <button class="btn small" data-action="new-forward" data-client="${c.id}">+ Forward</button>
           <button class="btn small" data-action="rename-client" data-id="${c.id}">Rename</button>
           <button class="btn small" data-action="rotate" data-id="${c.id}">Rotate token</button>
@@ -97,7 +118,7 @@
         </td>
       </tr>`).join("");
     $("#clients-table").innerHTML = state.clients.length
-      ? `<div class="table-wrap"><table><thead><tr><th>Status</th><th>Name</th><th>Address</th><th>Seen</th><th>Forwards</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+      ? `<div class="table-wrap"><table><thead><tr><th>Status</th><th>Name</th><th>Version</th><th>Address</th><th>Seen</th><th>Forwards</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="card empty">No clients yet. Click <strong>Add client</strong> to create one and get its install command.</div>`;
   }
 
@@ -146,6 +167,11 @@
       fwSel.innerHTML = (st.firewall_modes || ["auto", "off"]).map((m) => `<option value="${esc(m)}" ${m === st.firewall ? "selected" : ""}>${esc(FW_LABELS[m] || m)}</option>`).join("");
     }
     $("#firewall-status").innerHTML = fwStatusText(st.firewall_status);
+    const au = $("#updates-form input[name=auto_update_clients]");
+    if (document.activeElement !== au) au.checked = !!st.auto_update_clients;
+    $("#updates-status").textContent = st.server_version === "dev"
+      ? "This server runs a development build; automatic updates are paused until it runs a release version."
+      : `Clients are updated to the server's version (${st.server_version}). Update the server first, then push.`;
     $("#server-info-list").innerHTML = `
       <dt>Version</dt><dd>${esc(s.version)} (${esc(s.os)}/${esc(s.arch)})</dd>
       <dt>Tunnel</dt><dd class="mono">${esc(s.tunnel_addr)}</dd>
@@ -323,6 +349,19 @@
             const c = await api("POST", `/api/v1/clients/${id}/rotate-token`); toast("Token rotated"); await refresh(); installModal(c);
           }
           break;
+        case "update-client":
+          if (await confirmDialog("Update client?", `Push ${client.update.server_version} to “${client.name}” (currently ${client.client_version || "unknown"})? The client downloads the new binary through its tunnel, verifies it and restarts itself; players are disconnected for a few seconds.`, "Update")) {
+            await api("POST", `/api/v1/clients/${id}/update`); toast("Update requested"); refresh();
+          }
+          break;
+        case "update-all": {
+          const n = state.clients.filter((c) => c.update && c.update.available).length;
+          if (await confirmDialog("Update all outdated clients?", `Push the server's version to ${n} client${n === 1 ? "" : "s"}. Each one restarts itself; players are disconnected for a few seconds.`, "Update all")) {
+            const r = await api("POST", "/api/v1/clients/update-all");
+            toast(`Update requested for ${r.requested} client${r.requested === 1 ? "" : "s"}${r.skipped.length ? `, ${r.skipped.length} skipped` : ""}`); refresh();
+          }
+          break;
+        }
         case "delete-client":
           if (await confirmDialog("Delete client?", `Delete “${client.name}” and all ${client.forward_count} of its forwards? This cannot be undone.`)) {
             await api("DELETE", `/api/v1/clients/${id}`); toast("Client deleted"); refresh();
@@ -378,6 +417,10 @@
   $("#firewall-form").onsubmit = async (ev) => {
     ev.preventDefault();
     try { await api("PUT", "/api/v1/settings", { firewall: ev.target.firewall.value }); toast("Firewall setting saved"); refresh(); } catch (e) { fail(e); }
+  };
+  $("#updates-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    try { await api("PUT", "/api/v1/settings", { auto_update_clients: ev.target.auto_update_clients.checked }); toast("Update setting saved"); refresh(); } catch (e) { fail(e); }
   };
   $("#password-form").onsubmit = async (ev) => {
     ev.preventDefault();

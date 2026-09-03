@@ -12,8 +12,8 @@ API (documented in docs/API.md).
 - `internal/protocol` – wire format (Hello handshake, stream headers, UDP framing)
 - `internal/tlsutil` – self-signed certs and fingerprint pinning
 - `internal/store` – JSON state file (clients, forwards, tokens, admin, settings)
-- `internal/server` – tunnel manager (`tunnel.go`), HTTPS API (`api.go`, `auth.go`), embedded UI (`web/`), embedded client installers (`scripts/`)
-- `internal/client` – outbound tunnel client
+- `internal/server` – tunnel manager (`tunnel.go`), client self-update push/download (`update.go`), HTTPS API (`api.go`, `auth.go`), embedded UI (`web/`), embedded client installers (`scripts/`)
+- `internal/client` – outbound tunnel client; `update.go` installs binaries pushed by the server
 - `internal/firewall` – host firewall management: backends (ufw, firewalld, nftables, iptables), the root `firewall-agent` (unix socket) and its client; `internal/server/firewall.go` drives it
 - `scripts/install-server.sh` – VPS installer (systemd)
 - `docs/API.md` – API reference; keep it in sync with `internal/server/api.go`
