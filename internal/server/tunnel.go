@@ -348,6 +348,51 @@ func (t *Tunnel) Apply(f *store.Forward) error {
 	return nil
 }
 
+// ApplyGroup moves a forward group from prev to next as one unit: members
+// dropped from next are stopped, the rest are applied in order, and on the
+// first failure every listener is put back the way it was so a multi-port
+// change is all-or-nothing.
+func (t *Tunnel) ApplyGroup(next, prev []*store.Forward) error {
+	nextIDs := map[string]bool{}
+	for _, f := range next {
+		nextIDs[f.ID] = true
+	}
+	prevByID := map[string]*store.Forward{}
+	var removed []*store.Forward
+	for _, f := range prev {
+		prevByID[f.ID] = f
+		if !nextIDs[f.ID] {
+			removed = append(removed, f)
+			t.Remove(f.ID)
+		}
+	}
+	rollback := func(applied []*store.Forward) {
+		for _, a := range applied {
+			if old := prevByID[a.ID]; old != nil {
+				if err := t.Apply(old); err != nil {
+					t.log.Error("could not restore listener after failed group change", "forward", old.Name, "error", err)
+				}
+			} else {
+				t.Remove(a.ID)
+			}
+		}
+		for _, r := range removed {
+			if err := t.Apply(r); err != nil {
+				t.log.Error("could not restore listener after failed group change", "forward", r.Name, "error", err)
+			}
+		}
+	}
+	var applied []*store.Forward
+	for _, f := range next {
+		if err := t.Apply(f); err != nil {
+			rollback(applied)
+			return err
+		}
+		applied = append(applied, f)
+	}
+	return nil
+}
+
 // Remove stops the listeners for a forward id.
 func (t *Tunnel) Remove(forwardID string) {
 	t.mu.Lock()

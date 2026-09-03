@@ -63,8 +63,11 @@ type Client struct {
 // Forward exposes a public port on the relay that is relayed to a target
 // host:port reachable from the client.
 type Forward struct {
-	ID         string    `json:"id"`
-	ClientID   string    `json:"client_id"`
+	ID       string `json:"id"`
+	ClientID string `json:"client_id"`
+	// GroupID ties the forwards created from one port spec together. A
+	// forward created on its own is a group of one (GroupID == ID).
+	GroupID    string    `json:"group_id"`
 	Name       string    `json:"name"`
 	Protocol   string    `json:"protocol"` // tcp | udp | both
 	PublicPort int       `json:"public_port"`
@@ -155,7 +158,17 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
 	}
+	s.state.normalize()
 	return s, nil
+}
+
+// normalize fills fields introduced after a state file was written.
+func (st *State) normalize() {
+	for _, f := range st.Forwards {
+		if f.GroupID == "" {
+			f.GroupID = f.ID // pre-group forwards are groups of one
+		}
+	}
 }
 
 // Path returns the backing file path.
@@ -318,6 +331,44 @@ func (st *State) TokenByID(id string) *APIToken {
 	return nil
 }
 
+// ForwardsInGroup returns the members of a forward group, sorted by port.
+func (st *State) ForwardsInGroup(groupID string) []*Forward {
+	var out []*Forward
+	for _, f := range st.Forwards {
+		if f.GroupID == groupID {
+			out = append(out, f)
+		}
+	}
+	sortForwards(out)
+	return out
+}
+
+// GroupIDs returns the distinct group ids, ordered by each group's lowest
+// public port.
+func (st *State) GroupIDs() []string {
+	lowest := map[string]int{}
+	var ids []string
+	for _, f := range st.Forwards {
+		if p, ok := lowest[f.GroupID]; !ok || f.PublicPort < p {
+			if !ok {
+				ids = append(ids, f.GroupID)
+			}
+			lowest[f.GroupID] = f.PublicPort
+		}
+	}
+	sort.SliceStable(ids, func(i, j int) bool { return lowest[ids[i]] < lowest[ids[j]] })
+	return ids
+}
+
+func sortForwards(fs []*Forward) {
+	sort.Slice(fs, func(i, j int) bool {
+		if fs[i].PublicPort != fs[j].PublicPort {
+			return fs[i].PublicPort < fs[j].PublicPort
+		}
+		return fs[i].Protocol < fs[j].Protocol
+	})
+}
+
 // ForwardsForClient returns forwards belonging to client id, sorted by port.
 func (st *State) ForwardsForClient(id string) []*Forward {
 	var out []*Forward
@@ -326,7 +377,7 @@ func (st *State) ForwardsForClient(id string) []*Forward {
 			out = append(out, f)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].PublicPort < out[j].PublicPort })
+	sortForwards(out)
 	return out
 }
 

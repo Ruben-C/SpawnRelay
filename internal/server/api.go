@@ -59,6 +59,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/forwards/{id}", s.requireAuth(s.handleGetForward))
 	mux.HandleFunc("PATCH /api/v1/forwards/{id}", s.requireAuth(s.handleUpdateForward))
 	mux.HandleFunc("DELETE /api/v1/forwards/{id}", s.requireAuth(s.handleDeleteForward))
+	mux.HandleFunc("GET /api/v1/forward-groups", s.requireAuth(s.handleListGroups))
+	mux.HandleFunc("POST /api/v1/forward-groups", s.requireAuth(s.handleCreateGroup))
+	mux.HandleFunc("GET /api/v1/forward-groups/{id}", s.requireAuth(s.handleGetGroup))
+	mux.HandleFunc("PATCH /api/v1/forward-groups/{id}", s.requireAuth(s.handleUpdateGroup))
+	mux.HandleFunc("DELETE /api/v1/forward-groups/{id}", s.requireAuth(s.handleDeleteGroup))
 
 	// Interactive session only
 	mux.HandleFunc("PUT /api/v1/settings", s.requireSession(s.handlePutSettings))
@@ -219,11 +224,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 // ---- status & settings ---------------------------------------------------
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	var total, forwards int
+	var total, forwards, groups int
 	var clientIDs []string
 	s.store.View(func(st *store.State) {
 		total = len(st.Clients)
 		forwards = len(st.Forwards)
+		groups = len(st.GroupIDs())
 		for _, c := range st.Clients {
 			clientIDs = append(clientIDs, c.ID)
 		}
@@ -235,20 +241,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":            s.cfg.Version,
-		"server_time":        time.Now().UTC(),
-		"uptime_seconds":     int(time.Since(s.startedAt).Seconds()),
-		"public_host":        s.PublicHost(),
-		"tunnel_port":        s.tunnelPort,
-		"tunnel_addr":        s.TunnelAddr(),
-		"tunnel_fingerprint": s.tunnelFingerprint,
-		"admin_url":          s.AdminURL(),
-		"admin_self_signed":  s.adminSelfSigned,
-		"clients_total":      total,
-		"clients_online":     online,
-		"forwards_total":     forwards,
-		"os":                 runtime.GOOS,
-		"arch":               runtime.GOARCH,
+		"version":              s.cfg.Version,
+		"server_time":          time.Now().UTC(),
+		"uptime_seconds":       int(time.Since(s.startedAt).Seconds()),
+		"public_host":          s.PublicHost(),
+		"tunnel_port":          s.tunnelPort,
+		"tunnel_addr":          s.TunnelAddr(),
+		"tunnel_fingerprint":   s.tunnelFingerprint,
+		"admin_url":            s.AdminURL(),
+		"admin_self_signed":    s.adminSelfSigned,
+		"clients_total":        total,
+		"clients_online":       online,
+		"forwards_total":       forwards,
+		"forward_groups_total": groups,
+		"os":                   runtime.GOOS,
+		"arch":                 runtime.GOARCH,
 	})
 }
 
@@ -335,6 +342,7 @@ type clientOut struct {
 	ClientVersion string       `json:"client_version,omitempty"`
 	Status        ClientStatus `json:"status"`
 	ForwardCount  int          `json:"forward_count"`
+	GroupCount    int          `json:"forward_group_count"`
 	Install       installInfo  `json:"install"`
 	Update        updateOut    `json:"update"`
 }
@@ -380,11 +388,16 @@ func (s *Server) installInfo(token string) installInfo {
 	}
 }
 
-func (s *Server) clientOut(c *store.Client, forwardCount int) clientOut {
+func (s *Server) clientOut(st *store.State, c *store.Client) clientOut {
+	forwards := st.ForwardsForClient(c.ID)
+	groups := map[string]bool{}
+	for _, f := range forwards {
+		groups[f.GroupID] = true
+	}
 	return clientOut{
 		ID: c.ID, Name: c.Name, Token: c.Token, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
 		LastSeenAt: c.LastSeenAt, LastAddr: c.LastAddr, Hostname: c.Hostname, OS: c.OS, Arch: c.Arch,
-		ClientVersion: c.ClientVersion, Status: s.tunnel.ClientStatus(c.ID), ForwardCount: forwardCount,
+		ClientVersion: c.ClientVersion, Status: s.tunnel.ClientStatus(c.ID), ForwardCount: len(forwards), GroupCount: len(groups),
 		Install: s.installInfo(c.Token), Update: s.updateOut(c),
 	}
 }
@@ -393,7 +406,7 @@ func (s *Server) handleListClients(w http.ResponseWriter, r *http.Request) {
 	out := []clientOut{}
 	s.store.View(func(st *store.State) {
 		for _, c := range st.Clients {
-			out = append(out, s.clientOut(c, len(st.ForwardsForClient(c.ID))))
+			out = append(out, s.clientOut(st, c))
 		}
 	})
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
@@ -428,7 +441,9 @@ func (s *Server) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("client created", "client", c.Name, "client_id", c.ID, "by", principalFrom(r).Name)
-	writeJSON(w, http.StatusCreated, s.clientOut(c, 0))
+	var out clientOut
+	s.store.View(func(st *store.State) { out = s.clientOut(st, c) })
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
@@ -436,7 +451,7 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 	var out *clientOut
 	s.store.View(func(st *store.State) {
 		if c := st.ClientByID(id); c != nil {
-			o := s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+			o := s.clientOut(st, c)
 			out = &o
 		}
 	})
@@ -474,7 +489,7 @@ func (s *Server) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 			c.Name = name
 		}
 		c.UpdatedAt = time.Now()
-		out = s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+		out = s.clientOut(st, c)
 		return nil
 	})
 	if err != nil {
@@ -537,7 +552,7 @@ func (s *Server) handleRotateClientToken(w http.ResponseWriter, r *http.Request)
 		}
 		c.Token = store.NewClientToken()
 		c.UpdatedAt = time.Now()
-		out = s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+		out = s.clientOut(st, c)
 		return nil
 	})
 	if err != nil {
@@ -555,7 +570,7 @@ func (s *Server) handleUpdateClientBinary(w http.ResponseWriter, r *http.Request
 	var out *clientOut
 	s.store.View(func(st *store.State) {
 		if c := st.ClientByID(id); c != nil {
-			o := s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+			o := s.clientOut(st, c)
 			out = &o
 		}
 	})
@@ -570,7 +585,7 @@ func (s *Server) handleUpdateClientBinary(w http.ResponseWriter, r *http.Request
 	s.log.Info("client update requested", "client", out.Name, "client_id", id, "by", principalFrom(r).Name)
 	s.store.View(func(st *store.State) {
 		if c := st.ClientByID(id); c != nil {
-			o := s.clientOut(c, len(st.ForwardsForClient(c.ID)))
+			o := s.clientOut(st, c)
 			out = &o
 		}
 	})
@@ -606,6 +621,7 @@ func (s *Server) handleUpdateAllClients(w http.ResponseWriter, r *http.Request) 
 
 type forwardOut struct {
 	ID         string          `json:"id"`
+	GroupID    string          `json:"group_id"`
 	ClientID   string          `json:"client_id"`
 	ClientName string          `json:"client_name"`
 	Name       string          `json:"name"`
@@ -627,7 +643,7 @@ func (s *Server) forwardOut(st *store.State, f *store.Forward) forwardOut {
 		name = c.Name
 	}
 	return forwardOut{
-		ID: f.ID, ClientID: f.ClientID, ClientName: name, Name: f.Name, Protocol: f.Protocol,
+		ID: f.ID, GroupID: f.GroupID, ClientID: f.ClientID, ClientName: name, Name: f.Name, Protocol: f.Protocol,
 		PublicPort: f.PublicPort, PublicAddr: net.JoinHostPort(s.PublicHost(), strconv.Itoa(f.PublicPort)),
 		TargetHost: f.TargetHost, TargetPort: f.TargetPort, Enabled: f.Enabled,
 		CreatedAt: f.CreatedAt, UpdatedAt: f.UpdatedAt, Stats: s.tunnel.ForwardStats(f.ID),
@@ -701,6 +717,7 @@ func (s *Server) handleCreateForward(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	f := &store.Forward{ID: store.NewID(), Protocol: store.ProtoTCP, TargetHost: "127.0.0.1", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	f.GroupID = f.ID
 	in.applyTo(f)
 	if in.PublicPort == nil && in.TargetPort != nil {
 		f.PublicPort = f.TargetPort // convenient default: same port on both ends
@@ -779,6 +796,9 @@ func (s *Server) handleUpdateForward(w http.ResponseWriter, r *http.Request) {
 		next := *f
 		in.applyTo(&next)
 		next.UpdatedAt = time.Now()
+		if next.ClientID != f.ClientID && len(st.ForwardsInGroup(f.GroupID)) > 1 {
+			return fmt.Errorf("%w: this forward belongs to a multi-port group; move the group instead", store.ErrValidation)
+		}
 		if err := next.Validate(); err != nil {
 			return err
 		}

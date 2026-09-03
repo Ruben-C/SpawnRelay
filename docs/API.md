@@ -70,7 +70,8 @@ credentials: token management, password change and settings. They return
   "admin_self_signed": true,
   "clients_total": 2,
   "clients_online": 1,
-  "forwards_total": 3,
+  "forwards_total": 8,
+  "forward_groups_total": 3,
   "os": "linux",
   "arch": "amd64"
 }
@@ -143,7 +144,8 @@ Client object:
   "last_addr": "198.51.100.7:51234",
   "hostname": "gamebox", "os": "linux", "arch": "amd64", "client_version": "v1.0.0",
   "status": {"online": true, "connected_at": "…", "remote_addr": "198.51.100.7:51234"},
-  "forward_count": 2,
+  "forward_count": 8,
+  "forward_group_count": 3,
   "update": {
     "available": true,
     "server_version": "v0.3.0",
@@ -213,11 +215,17 @@ there through the tunnel to `target_host:target_port` as seen from the client
 machine. `target_host` defaults to `127.0.0.1`; use another LAN address to
 expose a server on a different machine in the client's network.
 
+Every forward belongs to a [forward group](#forward-groups). A forward created
+here is a group of one (`group_id` equals `id`); games that need several ports
+are easier to manage through the group endpoints, which is also what the web
+UI uses.
+
 Forward object:
 
 ```json
 {
   "id": "0f1e2d3c4b5a",
+  "group_id": "0f1e2d3c4b5a",
   "client_id": "a1b2c3d4e5f6",
   "client_name": "basement-pc",
   "name": "Minecraft survival",
@@ -258,8 +266,8 @@ public port (see [Host firewall](#host-firewall)):
 | `GET` | `/forwards` | – | all forwards, sorted by public port. Filter with `?client_id=…` |
 | `POST` | `/forwards` | see below | `201` created forward; the public port is bound and opened in the firewall immediately |
 | `GET` | `/forwards/{id}` | – | one forward |
-| `PATCH` | `/forwards/{id}` | any subset of the create fields | listeners are restarted and firewall rules updated if needed |
-| `DELETE` | `/forwards/{id}` | – | closes the public port and removes its firewall rule |
+| `PATCH` | `/forwards/{id}` | any subset of the create fields | listeners are restarted and firewall rules updated if needed. A member of a multi-port group cannot change `client_id` on its own (`400`); move the group instead |
+| `DELETE` | `/forwards/{id}` | – | closes the public port and removes its firewall rule. Deleting a member shrinks its group; a group with no members disappears |
 
 Create body fields:
 
@@ -297,6 +305,102 @@ curl -k -X PATCH -H "Authorization: Bearer $SR_TOKEN" -H "Content-Type: applicat
 
 # Remove it
 curl -k -X DELETE -H "Authorization: Bearer $SR_TOKEN" "$SR/forwards/0f1e2d3c4b5a"
+```
+
+### Forward groups
+
+A forward group is a set of forwards created from one **port spec** and
+managed as a unit: one name, client, target host and enabled flag, expanded
+into one forward per public port. Each port still has its own listener,
+firewall rule and counters. Use groups for games that need several ports.
+
+Port spec grammar, entries separated by commas and/or whitespace:
+
+| Entry | Meaning |
+|---|---|
+| `7777` | one port |
+| `7780-7784` | an inclusive range |
+| `7777/udp` | protocol for this entry: `tcp`, `udp` or `both`. Without a suffix the group's `protocol` applies (default `tcp`) |
+| `27015>37015` | relay to a different port on the target host. For a range the target names the first port and the rest shift by the same offset, so `2000-2005>3000` targets 3000–3005 |
+
+Example: `7780-7784/udp, 5673, 15673, 25673>35673` with `protocol: "tcp"`
+opens five UDP ports and three TCP ports, relaying 25673 to 35673.
+
+A spec may expand to at most 64 public ports. Malformed entries, ports outside
+1–65535 (public or target), an empty spec, or the same public port listed
+twice with an overlapping protocol are rejected with `400` naming the entry.
+Listing a port once as `/tcp` and once as `/udp` is fine.
+
+Group object:
+
+```json
+{
+  "id": "9a8b7c6d5e4f",
+  "client_id": "a1b2c3d4e5f6",
+  "client_name": "basement-pc",
+  "name": "Dune Awakening",
+  "protocol": "udp",
+  "ports": "5673/tcp, 7780-7784/udp, 15673/tcp, 25673/tcp>35673",
+  "target_host": "192.168.1.20",
+  "enabled": true,
+  "created_at": "…", "updated_at": "…",
+  "public_host": "relay.example.com",
+  "stats": {"listening": true, "active_tcp": 1, "active_udp": 4, "total_connections": 57, "bytes_in": 1280000, "bytes_out": 54000000},
+  "firewall": {"state": "open"},
+  "forwards": [ …member forward objects, sorted by public port… ]
+}
+```
+
+`ports` is the canonical rendering of the members: sorted by port, contiguous
+runs collapsed into ranges, the protocol always shown and `>target` only when
+it differs. `protocol` is the lowest-port member's protocol. `enabled` is true
+only when every member is enabled. `stats` sums the members' counters, and
+`stats.listening` is true only when every enabled member is listening.
+`firewall` is the worst state among enabled members (`error` wins, then
+`existing`, `open`), with the first error message.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `GET` | `/forward-groups` | – | all groups, sorted by lowest public port. Filter with `?client_id=…` |
+| `POST` | `/forward-groups` | see below | `201` created group with all ports bound and opened in the firewall |
+| `GET` | `/forward-groups/{id}` | – | one group |
+| `PATCH` | `/forward-groups/{id}` | any subset of the create fields | members are matched by public port and protocol: kept ports keep their `id` and counters, removed ports are closed, new ports are opened |
+| `DELETE` | `/forward-groups/{id}` | – | closes every member's port; returns `{"ok":true,"forwards_removed":n}` |
+
+Create body fields:
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `client_id` | yes | – | id of an existing client |
+| `ports` | yes | – | port spec, see above |
+| `protocol` | no | `tcp` | protocol for entries without a `/tcp`, `/udp` or `/both` suffix. Also defaults to `tcp` on `PATCH` when omitted |
+| `target_host` | no | `127.0.0.1` | host reachable from the client, shared by every port |
+| `name` | no | the canonical `ports` | up to 64 characters |
+| `enabled` | no | `true` | applies to every member |
+
+Creates and updates are all-or-nothing: if any port is the tunnel or admin
+port, is already used by a forward outside the group, or cannot be bound, the
+response is `409` naming that port and nothing changes. Changing `client_id`
+on a group moves every member.
+
+Examples:
+
+```bash
+# Dune Awakening: a UDP range plus three TCP ports on a machine in the client's LAN
+curl -k -H "Authorization: Bearer $SR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"client_id":"a1b2c3d4e5f6","name":"Dune Awakening","ports":"7780-7784/udp, 5673, 15673, 25673","target_host":"192.168.1.20"}' \
+  "$SR/forward-groups"
+
+# Add two more UDP ports; the existing eight keep their ids and counters
+curl -k -X PATCH -H "Authorization: Bearer $SR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"ports":"7780-7786/udp, 5673, 15673, 25673"}' "$SR/forward-groups/9a8b7c6d5e4f"
+
+# Take the whole game offline without losing its configuration
+curl -k -X PATCH -H "Authorization: Bearer $SR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"enabled":false}' "$SR/forward-groups/9a8b7c6d5e4f"
+
+# Remove all of its ports
+curl -k -X DELETE -H "Authorization: Bearer $SR_TOKEN" "$SR/forward-groups/9a8b7c6d5e4f"
 ```
 
 ### Host firewall

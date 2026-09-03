@@ -4,7 +4,7 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const state = { tab: "clients", status: null, clients: [], forwards: [], tokens: [], settings: null, timer: null };
+  const state = { tab: "clients", status: null, clients: [], groups: [], tokens: [], settings: null, timer: null, expanded: new Set() };
 
   // ---- API ----------------------------------------------------------------
   async function api(method, path, body) {
@@ -75,7 +75,7 @@
     $("#server-host").textContent = s.public_host;
     $("#stats").innerHTML = `
       <div class="stat"><div class="label">Clients online</div><div class="value">${s.clients_online} <span class="muted">/ ${s.clients_total}</span></div></div>
-      <div class="stat"><div class="label">Port forwards</div><div class="value">${s.forwards_total}</div></div>
+      <div class="stat"><div class="label">Port forwards</div><div class="value">${s.forward_groups_total} <span class="muted small">${s.forwards_total} port${s.forwards_total === 1 ? "" : "s"}</span></div></div>
       <div class="stat"><div class="label">Tunnel endpoint</div><div class="value mono copy" data-copy="${esc(s.tunnel_addr)}" title="Click to copy">${esc(s.tunnel_addr)}</div></div>
       <div class="stat"><div class="label">Uptime</div><div class="value">${fmtDur(s.uptime_seconds)} <span class="muted small">v${esc(s.version)}</span></div></div>`;
   }
@@ -107,7 +107,7 @@
         <td>${versionCell(c)}</td>
         <td class="mono">${esc(c.status.online ? c.status.remote_addr : c.last_addr || "—")}</td>
         <td>${c.status.online ? `since ${fmtAgo(c.status.connected_at)}` : fmtAgo(c.last_seen_at)}</td>
-        <td>${c.forward_count}</td>
+        <td>${c.forward_group_count}</td>
         <td class="actions">
           ${c.update && c.update.available ? `<button class="btn small primary" data-action="update-client" data-id="${c.id}">Update</button>` : ""}
           <button class="btn small ${c.update && c.update.available ? "" : "primary"}" data-action="install" data-id="${c.id}">Install</button>
@@ -122,29 +122,72 @@
       : `<div class="card empty">No clients yet. Click <strong>Add client</strong> to create one and get its install command.</div>`;
   }
 
-  function renderForwards() {
-    const clientById = Object.fromEntries(state.clients.map((c) => [c.id, c]));
-    const rows = state.forwards.map((f) => {
-      const c = clientById[f.client_id];
-      const online = c && c.status.online;
+  const trafficCell = (st) => {
+    st = st || {};
+    const active = (st.active_tcp || 0) + (st.active_udp || 0);
+    return `<span title="active connections">${active} active</span><div class="subtle">${st.total_connections || 0} total · ${fmtBytes(st.bytes_in)} in / ${fmtBytes(st.bytes_out)} out</div>`;
+  };
+
+  // A group's problems must show on the collapsed row, not only inside it.
+  function groupWarning(g) {
+    if (!g.enabled) return "";
+    const st = g.stats || {}, fw = g.firewall || {};
+    if (!st.listening) return `<span class="badge err" title="${esc(st.error || "A port could not be opened on the relay")}">not listening</span>`;
+    if (fw.state === "error") return `<span class="badge err" title="${esc(fw.error || "")}">firewall error</span>`;
+    return "";
+  }
+
+  function memberTable(g) {
+    const rows = g.forwards.map((f) => {
       const st = f.stats || {};
-      const active = (st.active_tcp || 0) + (st.active_udp || 0);
+      const listen = !f.enabled ? '<span class="muted">disabled</span>'
+        : st.listening ? '<span class="ok">listening</span>'
+        : `<span class="err" title="${esc(st.error || "")}">not listening</span>`;
       return `<tr>
-        <td><strong>${esc(f.name)}</strong>${f.enabled ? "" : ' <span class="badge off">disabled</span>'}</td>
-        <td><span class="dot ${online ? "on" : "off"}"></span>${esc(f.client_name || "?")}</td>
         <td>${badge(f.protocol)}</td>
-        <td class="mono"><span class="copy" data-copy="${esc(f.public_addr)}" title="Click to copy">${esc(f.public_addr)}</span>${fwLine(f.firewall)}</td>
+        <td class="mono"><span class="copy" data-copy="${esc(f.public_addr)}" title="Click to copy">${esc(f.public_addr)}</span></td>
         <td class="mono">${esc(f.target_host)}:${f.target_port}</td>
-        <td><span title="active connections">${active} active</span><div class="subtle">${st.total_connections || 0} total · ${fmtBytes(st.bytes_in)} in / ${fmtBytes(st.bytes_out)} out</div></td>
-        <td><button class="toggle ${f.enabled ? "on" : ""}" data-action="toggle-forward" data-id="${f.id}" data-enabled="${f.enabled}" title="${f.enabled ? "Disable" : "Enable"}"></button></td>
-        <td class="actions">
-          <button class="btn small" data-action="edit-forward" data-id="${f.id}">Edit</button>
-          <button class="btn small danger" data-action="delete-forward" data-id="${f.id}">Delete</button>
-        </td>
+        <td>${listen}</td>
+        <td>${fwLine(f.firewall) || '<span class="subtle">firewall: not managed</span>'}</td>
+        <td>${trafficCell(st)}</td>
       </tr>`;
     }).join("");
-    $("#forwards-table").innerHTML = state.forwards.length
-      ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Client</th><th>Proto</th><th>Public address</th><th>Target</th><th>Traffic</th><th>On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+    return `<table class="members"><thead><tr><th>Proto</th><th>Public address</th><th>Target</th><th>State</th><th>Firewall</th><th>Traffic</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+
+  function renderForwards() {
+    const clientById = Object.fromEntries(state.clients.map((c) => [c.id, c]));
+    const rows = state.groups.map((g) => {
+      const c = clientById[g.client_id];
+      const online = c && c.status.online;
+      const f0 = g.forwards[0];
+      const multi = g.forwards.length > 1;
+      const open = state.expanded.has(g.id);
+      const portsCell = multi
+        ? `<button class="chevron ${open ? "open" : ""}" data-action="expand-group" data-id="${g.id}" title="${open ? "Hide ports" : "Show ports"}" aria-expanded="${open}"></button><span class="mono">${esc(g.ports)}</span><div class="subtle">${g.forwards.length} ports</div>`
+        : `${badge(f0.protocol)} <span class="mono">${f0.public_port}</span>`;
+      const publicCell = multi
+        ? `<span class="mono">${esc(g.public_host)}</span>${fwLine(g.firewall)}`
+        : `<span class="mono copy" data-copy="${esc(f0.public_addr)}" title="Click to copy">${esc(f0.public_addr)}</span>${fwLine(f0.firewall)}`;
+      const targetCell = multi ? esc(g.target_host) : `${esc(f0.target_host)}:${f0.target_port}`;
+      let row = `<tr>
+        <td><strong>${esc(g.name)}</strong>${g.enabled ? "" : ' <span class="badge off">disabled</span>'} ${groupWarning(g)}</td>
+        <td><span class="dot ${online ? "on" : "off"}"></span>${esc(g.client_name || "?")}</td>
+        <td>${portsCell}</td>
+        <td>${publicCell}</td>
+        <td class="mono">${targetCell}</td>
+        <td>${trafficCell(g.stats)}</td>
+        <td><button class="toggle ${g.enabled ? "on" : ""}" data-action="toggle-forward" data-id="${g.id}" data-enabled="${g.enabled}" title="${g.enabled ? "Disable" : "Enable"}"></button></td>
+        <td class="actions">
+          <button class="btn small" data-action="edit-forward" data-id="${g.id}">Edit</button>
+          <button class="btn small danger" data-action="delete-forward" data-id="${g.id}">Delete</button>
+        </td>
+      </tr>`;
+      if (multi && open) row += `<tr class="sub"><td colspan="8">${memberTable(g)}</td></tr>`;
+      return row;
+    }).join("");
+    $("#forwards-table").innerHTML = state.groups.length
+      ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Client</th><th>Ports</th><th>Public address</th><th>Target</th><th>Traffic</th><th>On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="card empty">No forwards yet. ${state.clients.length ? "Click <strong>Add forward</strong> to expose a game server." : "Add a client first, then create a forward for it."}</div>`;
   }
 
@@ -209,12 +252,12 @@
   async function refresh() {
     try {
       const jobs = [api("GET", "/api/v1/status"), api("GET", "/api/v1/clients")];
-      if (state.tab === "forwards") jobs.push(api("GET", "/api/v1/forwards"));
+      if (state.tab === "forwards") jobs.push(api("GET", "/api/v1/forward-groups"));
       if (state.tab === "tokens") jobs.push(api("GET", "/api/v1/tokens"));
       if (state.tab === "settings") jobs.push(api("GET", "/api/v1/settings"));
       const [status, clients, extra] = await Promise.all(jobs);
       state.status = status; state.clients = clients;
-      if (state.tab === "forwards") state.forwards = extra;
+      if (state.tab === "forwards") state.groups = extra;
       if (state.tab === "tokens") state.tokens = extra;
       if (state.tab === "settings") state.settings = extra;
       render();
@@ -240,57 +283,53 @@
       <div class="form-actions"><button class="btn" data-modal="close">Close</button></div>`);
   }
 
+  // Presets are port specs, so multi-port games fit the same table.
   const PRESETS = [
-    ["Minecraft Java", 25565, "tcp"], ["Minecraft Bedrock", 19132, "udp"], ["Terraria", 7777, "tcp"],
-    ["Valheim", 2456, "udp"], ["Palworld", 8211, "udp"], ["Factorio", 34197, "udp"], ["Rust", 28015, "both"],
-    ["ARK: Survival", 7777, "udp"], ["Counter-Strike 2", 27015, "both"], ["Project Zomboid", 16261, "udp"],
-    ["Enshrouded", 15636, "udp"], ["7 Days to Die", 26900, "both"], ["Satisfactory", 7777, "both"], ["Team Fortress 2", 27015, "both"],
+    ["Minecraft Java", "25565", "tcp"], ["Minecraft Bedrock", "19132", "udp"], ["Terraria", "7777", "tcp"],
+    ["Valheim", "2456", "udp"], ["Palworld", "8211", "udp"], ["Factorio", "34197", "udp"], ["Rust", "28015", "both"],
+    ["ARK: Survival", "7777", "udp"], ["Counter-Strike 2", "27015", "both"], ["Project Zomboid", "16261", "udp"],
+    ["Enshrouded", "15636", "udp"], ["7 Days to Die", "26900", "both"], ["Satisfactory", "7777", "both"], ["Team Fortress 2", "27015", "both"],
   ];
 
-  function forwardModal(f, presetClient) {
-    const isEdit = !!f;
-    f = f || { name: "", client_id: presetClient || (state.clients[0] && state.clients[0].id) || "", protocol: "tcp", public_port: "", target_host: "127.0.0.1", target_port: "", enabled: true };
-    const clientOpts = state.clients.map((c) => `<option value="${c.id}" ${c.id === f.client_id ? "selected" : ""}>${esc(c.name)}${c.status.online ? "" : " (offline)"}</option>`).join("");
-    const presetOpts = PRESETS.map(([n, p, pr]) => `<option value="${p}|${pr}">${esc(n)} — ${p} ${pr}</option>`).join("");
+  function forwardModal(g, presetClient) {
+    const isEdit = !!g;
+    g = g || { name: "", client_id: presetClient || (state.clients[0] && state.clients[0].id) || "", protocol: "tcp", ports: "", target_host: "127.0.0.1", enabled: true };
+    const clientOpts = state.clients.map((c) => `<option value="${c.id}" ${c.id === g.client_id ? "selected" : ""}>${esc(c.name)}${c.status.online ? "" : " (offline)"}</option>`).join("");
+    const presetOpts = PRESETS.map(([n, spec, pr]) => `<option value="${esc(spec)}|${pr}">${esc(n)} — ${esc(spec)} ${pr}</option>`).join("");
     openModal(`<h3>${isEdit ? "Edit forward" : "New forward"}</h3>
       <form id="forward-form">
-        ${isEdit ? "" : `<label>Game preset (optional) <select name="preset"><option value="">Choose a game to fill in the port…</option>${presetOpts}</select></label>`}
-        <label>Name <input name="name" value="${esc(f.name)}" placeholder="e.g. Minecraft survival" maxlength="64"></label>
+        ${isEdit ? "" : `<label>Game preset (optional) <select name="preset"><option value="">Choose a game to fill in the ports…</option>${presetOpts}</select></label>`}
+        <label>Name <input name="name" value="${esc(g.name)}" placeholder="e.g. Minecraft survival" maxlength="64"></label>
         <label>Client <select name="client_id" required>${clientOpts}</select></label>
         <div class="row">
-          <label>Protocol <select name="protocol">
-            <option value="tcp" ${f.protocol === "tcp" ? "selected" : ""}>TCP</option>
-            <option value="udp" ${f.protocol === "udp" ? "selected" : ""}>UDP</option>
-            <option value="both" ${f.protocol === "both" ? "selected" : ""}>TCP + UDP</option></select></label>
-          <label>Public port (on relay) <input name="public_port" type="number" min="1" max="65535" required value="${esc(f.public_port)}"></label>
+          <label>Default protocol <select name="protocol">
+            <option value="tcp" ${g.protocol === "tcp" ? "selected" : ""}>TCP</option>
+            <option value="udp" ${g.protocol === "udp" ? "selected" : ""}>UDP</option>
+            <option value="both" ${g.protocol === "both" ? "selected" : ""}>TCP + UDP</option></select></label>
+          <label>Target host (from client) <input name="target_host" required value="${esc(g.target_host)}"></label>
         </div>
-        <div class="row">
-          <label>Target host (from client) <input name="target_host" required value="${esc(f.target_host)}"></label>
-          <label>Target port <input name="target_port" type="number" min="1" max="65535" required value="${esc(f.target_port)}"></label>
-        </div>
-        <label class="check"><input type="checkbox" name="enabled" ${f.enabled ? "checked" : ""}> Enabled</label>
+        <label>Ports (on relay) <input name="ports" class="mono" required value="${esc(g.ports)}" placeholder="e.g. 7780-7784/udp, 5673, 15673" spellcheck="false" autocomplete="off">
+          <span class="hint">Ports or ranges separated by commas. Add <span class="mono">/tcp</span>, <span class="mono">/udp</span> or <span class="mono">/both</span> to override the default protocol and <span class="mono">&gt;port</span> to relay to a different port, e.g. <span class="mono">2000-2005/udp, 2009, 2011&gt;3011</span>. Up to 64 ports.</span></label>
+        <label class="check"><input type="checkbox" name="enabled" ${g.enabled ? "checked" : ""}> Enabled</label>
         <div class="form-actions"><button class="btn" type="button" data-modal="close">Cancel</button><button class="btn primary" type="submit">${isEdit ? "Save" : "Create"}</button></div>
       </form>`);
     const form = $("#forward-form");
     const preset = form.querySelector("[name=preset]");
     if (preset) preset.onchange = () => {
       if (!preset.value) return;
-      const [port, proto] = preset.value.split("|");
-      form.public_port.value = port; form.target_port.value = port; form.protocol.value = proto;
+      const [spec, proto] = preset.value.split("|");
+      form.ports.value = spec; form.protocol.value = proto;
       if (!form.name.value) form.name.value = preset.options[preset.selectedIndex].text.split(" — ")[0];
     };
-    form.public_port.oninput = () => { if (!isEdit && !form.target_port.dataset.touched) form.target_port.value = form.public_port.value; };
-    form.target_port.oninput = () => { form.target_port.dataset.touched = "1"; };
     form.onsubmit = async (ev) => {
       ev.preventDefault();
       const body = {
         name: form.name.value.trim(), client_id: form.client_id.value, protocol: form.protocol.value,
-        public_port: Number(form.public_port.value), target_host: form.target_host.value.trim(),
-        target_port: Number(form.target_port.value), enabled: form.enabled.checked,
+        ports: form.ports.value.trim(), target_host: form.target_host.value.trim(), enabled: form.enabled.checked,
       };
       if (!body.name) delete body.name;
       try {
-        if (isEdit) await api("PATCH", `/api/v1/forwards/${f.id}`, body); else await api("POST", "/api/v1/forwards", body);
+        if (isEdit) await api("PATCH", `/api/v1/forward-groups/${g.id}`, body); else await api("POST", "/api/v1/forward-groups", body);
         closeModal(); toast(isEdit ? "Forward saved" : "Forward created"); setTab("forwards");
       } catch (e) { fail(e); }
     };
@@ -338,7 +377,7 @@
   async function handleAction(btn) {
     const { action, id } = btn.dataset;
     const client = state.clients.find((c) => c.id === id);
-    const fwd = state.forwards.find((f) => f.id === id);
+    const grp = state.groups.find((g) => g.id === id);
     try {
       switch (action) {
         case "new-client": clientModal(); break;
@@ -363,21 +402,26 @@
           break;
         }
         case "delete-client":
-          if (await confirmDialog("Delete client?", `Delete “${client.name}” and all ${client.forward_count} of its forwards? This cannot be undone.`)) {
+          if (await confirmDialog("Delete client?", `Delete “${client.name}” and all ${client.forward_group_count} of its forwards (${client.forward_count} port${client.forward_count === 1 ? "" : "s"})? This cannot be undone.`)) {
             await api("DELETE", `/api/v1/clients/${id}`); toast("Client deleted"); refresh();
           }
           break;
         case "new-forward":
           if (!state.clients.length) { toast("Add a client first", true); break; }
           forwardModal(null, btn.dataset.client); break;
-        case "edit-forward": forwardModal(fwd); break;
+        case "edit-forward": forwardModal(grp); break;
+        case "expand-group":
+          if (state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+          renderForwards(); break;
         case "toggle-forward":
-          await api("PATCH", `/api/v1/forwards/${id}`, { enabled: btn.dataset.enabled !== "true" }); refresh(); break;
-        case "delete-forward":
-          if (await confirmDialog("Delete forward?", `Delete “${fwd.name}” (port ${fwd.public_port})? Players will no longer be able to connect through it.`)) {
-            await api("DELETE", `/api/v1/forwards/${id}`); toast("Forward deleted"); refresh();
+          await api("PATCH", `/api/v1/forward-groups/${id}`, { enabled: btn.dataset.enabled !== "true" }); refresh(); break;
+        case "delete-forward": {
+          const n = grp.forwards.length;
+          if (await confirmDialog("Delete forward?", `Delete “${grp.name}” (${n === 1 ? `port ${grp.forwards[0].public_port}` : `${n} ports: ${grp.ports}`})? Players will no longer be able to connect through it.`)) {
+            await api("DELETE", `/api/v1/forward-groups/${id}`); toast("Forward deleted"); refresh();
           }
           break;
+        }
         case "new-token": tokenModal(); break;
         case "delete-token":
           if (await confirmDialog("Revoke token?", "Anything using this token will stop working immediately.", "Revoke")) {

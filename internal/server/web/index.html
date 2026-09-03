@@ -55,7 +55,7 @@
         <h2>Port forwards</h2>
         <button class="btn primary" data-action="new-forward">+ Add forward</button>
       </div>
-      <p class="muted">Each forward opens a public port on the relay and sends its traffic through the tunnel to a port on the client machine.</p>
+      <p class="muted">Each forward opens one or more public ports on the relay and sends their traffic through the tunnel to the same ports on the client machine. Games that need several ports (a UDP range plus a few TCP ports, say) fit in one forward.</p>
       <div id="forwards-table"></div>
     </section>
 
