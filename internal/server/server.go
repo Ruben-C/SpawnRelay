@@ -29,9 +29,12 @@ type Config struct {
 	PublicHost string // hostname/IP players use; overrides the stored setting when set
 	AdminCert  string // optional PEM certificate for the admin listener
 	AdminKey   string // optional PEM key for the admin listener
-	// FirewallSocket is the unix socket of the firewall agent; defaults to
-	// <DataDir>/firewall.sock.
-	FirewallSocket string
+	// AgentSocket is the unix socket of the root agent; by default the server
+	// looks for <DataDir>/agent.sock, then the older <DataDir>/firewall.sock.
+	AgentSocket string
+	// UpdateRepo is the GitHub repository (owner/name) whose releases the
+	// server offers as updates; defaults to DefaultUpdateRepo.
+	UpdateRepo string
 
 	ResetAdminPassword bool
 	Version            string
@@ -45,6 +48,7 @@ type Server struct {
 	store    *store.Store
 	tunnel   *Tunnel
 	firewall *fwManager
+	updater  *selfUpdater
 
 	tunnelFingerprint string
 	adminTLS          *tls.Config
@@ -86,10 +90,8 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("admin address: %w", err)
 	}
 	s.detectedHost = detectOutboundIP()
-	if cfg.FirewallSocket == "" {
-		cfg.FirewallSocket = filepath.Join(cfg.DataDir, "firewall.sock")
-	}
-	s.firewall = newFwManager(st, cfg.FirewallSocket, s.tunnelPort, s.adminPort, s.log)
+	s.firewall = newFwManager(st, cfg.AgentSocket, cfg.DataDir, s.tunnelPort, s.adminPort, s.log)
+	s.updater = newSelfUpdater(s, cfg.UpdateRepo)
 
 	// Persist an explicit public host, then cache whatever is configured.
 	if cfg.PublicHost != "" {
@@ -231,6 +233,8 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.firewall.Sync(ctx)
 	go s.firewall.Run(ctx)
+	s.updater.adoptStaged()
+	go s.updater.run(ctx)
 
 	httpSrv := &http.Server{
 		Handler:           s.routes(),

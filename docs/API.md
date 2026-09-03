@@ -72,6 +72,7 @@ credentials: token management, password change and settings. They return
   "clients_online": 1,
   "forwards_total": 8,
   "forward_groups_total": 3,
+  "server_update": {"available": true, "version": "v0.5.0"},
   "os": "linux",
   "arch": "amd64"
 }
@@ -106,7 +107,7 @@ credentials: token management, password change and settings. They return
     "backend": "ufw",
     "active": true,
     "last_sync": "2026-09-03T10:00:00Z",
-    "socket": "/var/lib/spawnrelay/firewall.sock"
+    "socket": "/var/lib/spawnrelay/agent.sock"
   }
 }
 ```
@@ -412,10 +413,13 @@ or deleted. A firewall problem never fails a forward request; it is reported
 in the forward's `firewall` field and in `GET /settings`.
 
 The relay server runs unprivileged, so the actual firewall changes are made by
-a separate root-only process, `spawnrelay firewall-agent`, installed by the
-server installer as `spawnrelay-firewall.service`. The server talks to it over
-a unix socket in the data directory and can only ask for one thing: "make the
-set of ports you have opened equal to this list". Every rule the agent creates
+a separate root-only process, `spawnrelay agent`, installed by the server
+installer as `spawnrelay-agent.service` (before v0.5: `spawnrelay firewall-agent`
+and `spawnrelay-firewall.service`; a server still finds such an agent, but it
+cannot install updates). The server talks to it over a unix socket in the data
+directory and can ask for two things only: "make the set of ports you have
+opened equal to this list" and "install this release tag" (see
+[Server updates](#server-updates-session-only)). Every rule the agent creates
 is tagged `spawnrelay:<forward id>` (`spawnrelay:tunnel` and
 `spawnrelay:admin` for the relay's own ports); it never adds, changes or
 removes anything else, so rules you created by hand, including one that
@@ -430,12 +434,64 @@ not persisted by SpawnRelay; the server re-syncs at start-up, on every
 change and every five minutes, which restores them after a reboot once the
 base ruleset is back.
 
-The firewall agent cannot open ports in a cloud provider's security group.
+The agent cannot open ports in a cloud provider's security group.
 Those still have to be opened by hand.
 
 Sync cadence: on server start, after every forward or client change, when
 the firewall mode changes, every five minutes, and every 20 seconds while
 the last sync failed or the agent is not installed.
+
+### Server updates (session only)
+
+The server checks the latest release of its GitHub repository (`--update-repo`,
+default `Ruben-C/SpawnRelay`) at start-up and hourly. `GET /status` carries
+the result as `server_update` so the UI can show an indicator; the endpoints
+below require an interactive admin session, API tokens are refused with `403`.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `GET` | `/server/update` | – | update status, see below |
+| `POST` | `/server/update/check` | – | re-checks GitHub now, then returns the status |
+| `POST` | `/server/update` | `{"version"?, "reinstall"?}` | `202` and the status once the update has started |
+
+```json
+{
+  "running_version": "v0.4.0",
+  "latest_version": "v0.5.0",
+  "checked_at": "…",
+  "check_error": "",
+  "available": true,
+  "reason": "",
+  "supported": true,
+  "install_command": "curl -fsSL https://raw.githubusercontent.com/Ruben-C/SpawnRelay/main/scripts/install-server.sh | sudo bash",
+  "last": {"state": "done", "from": "v0.3.0", "to": "v0.4.0", "detail": "updated to v0.4.0", "started_at": "…", "finished_at": "…"}
+}
+```
+
+`available` is true only when both versions parse as `vMAJOR.MINOR.PATCH` and
+the latest is newer; a `dev` build never has an update and `reason` says so.
+`supported` is true when a root agent that can install updates answers on
+the socket; otherwise `reason` explains and `install_command` is the manual
+way. `last` is the most recent attempt (`pending`, `done`, `failed` or
+`rolled_back`) or `null`.
+
+`POST /server/update` without a body installs the latest release. With
+`version` it must be the latest release, or the running version together with
+`"reinstall": true`; anything else is `400` (older versions are never
+installed). It is `409` while an update is pending, when nothing is available
+or when the host is not supported.
+
+What happens: the server downloads every client binary of the release into
+`<data-dir>/updates/<tag>/` and verifies each against the release's
+`SHA256SUMS` (any mismatch fails the update before anything is touched). It
+then hands only the tag to the agent, which downloads and verifies the server
+tarball itself, keeps the current binary as `<binary>.previous`, installs the
+new one, restarts `spawnrelay-server.service` and waits up to 60 seconds for
+the new version to answer on the admin port. If it does not, the previous
+binary is restored and the attempt ends as `rolled_back`. The agent restarts
+itself last. The new server moves the staged client binaries into
+`<data-dir>/bin/` on start-up, so client pushes always match the running
+version. Sessions do not survive the restart: sign in again afterwards.
 
 ### API tokens (session only)
 

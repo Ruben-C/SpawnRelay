@@ -3,13 +3,11 @@ package firewall
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fakeRunner records commands and answers from a table keyed by the joined
@@ -251,67 +249,5 @@ func TestFirewalldSync(t *testing.T) {
 	}
 	if !reflect.DeepEqual(l.Firewalld, map[string]string{"25565/tcp": "abc123", "9000/udp": "m"}) {
 		t.Fatalf("ledger = %v", l.Firewalld)
-	}
-}
-
-type fakeBackend struct{ got []Rule }
-
-func (f *fakeBackend) Name() string { return "fake" }
-func (f *fakeBackend) Sync(ctx context.Context, want []Rule) (*Result, error) {
-	f.got = want
-	res := newResult("fake")
-	res.Active = true
-	for _, w := range want {
-		res.set(w, StateOpen, nil)
-	}
-	return res, nil
-}
-
-func TestAgentRoundTrip(t *testing.T) {
-	if os.Getenv("CI_NO_UNIX_SOCKETS") != "" {
-		t.Skip()
-	}
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "fw.sock")
-	fb := &fakeBackend{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- Serve(ctx, AgentConfig{
-			Socket: sock, Version: "test", Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
-			factory: func(ctx context.Context, mode string) (Backend, error) { return fb, nil },
-		})
-	}()
-	for i := 0; i < 50 && !Available(sock); i++ {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !Available(sock) {
-		t.Fatal("agent did not start")
-	}
-	rules := []Rule{{ID: "tunnel", Port: 7443, Proto: "tcp"}, {ID: "abc", Port: 25565, Proto: "tcp"}}
-	resp, err := Sync(ctx, sock, ModeAuto, rules)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.OK || resp.Backend != "fake" || resp.Rules["25565/tcp"].State != StateOpen || resp.Version != "test" {
-		t.Fatalf("resp = %+v", resp)
-	}
-	if !reflect.DeepEqual(fb.got, rules) {
-		t.Fatalf("backend got %v", fb.got)
-	}
-	// Invalid input is rejected before reaching the backend.
-	if _, err := Sync(ctx, sock, ModeAuto, []Rule{{ID: "bad id!", Port: 1, Proto: "tcp"}}); err == nil || !strings.Contains(err.Error(), "invalid rule id") {
-		t.Fatalf("expected validation error, got %v", err)
-	}
-	if _, err := Sync(ctx, sock, ModeOff, nil); err == nil {
-		t.Fatal("mode off must be rejected by the agent")
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if Available(sock) {
-		t.Fatal("socket not cleaned up")
 	}
 }

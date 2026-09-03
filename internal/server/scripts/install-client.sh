@@ -57,6 +57,38 @@ else
   BIN_DIR=/usr/local/bin
 fi
 
+# ---- previous versions -----------------------------------------------------
+# Stop whatever an earlier install left running so the binary can be
+# replaced, and remove its leftovers. Only "spawnrelay client" processes are
+# touched: a relay server or agent may share this host.
+client_pids() { pgrep -f '^([^ ]*/)?spawnrelay client( |$)' 2>/dev/null || true; }
+if [ "$os" = "linux" ] && command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/spawnrelay-client.service ]; then
+  if systemctl is-active --quiet spawnrelay-client.service 2>/dev/null; then
+    log "stopping spawnrelay-client.service from the previous version"
+    systemctl stop spawnrelay-client.service >/dev/null 2>&1 || true
+  fi
+elif [ "$os" = "darwin" ] && [ -f /Library/LaunchDaemons/org.spawnrelay.client.plist ]; then
+  log "stopping the previous launchd client"
+  launchctl bootout system /Library/LaunchDaemons/org.spawnrelay.client.plist >/dev/null 2>&1 || true
+fi
+pids="$(client_pids)"
+if [ -n "$pids" ]; then
+  log "stopping spawnrelay client processes left running (pid $(echo $pids | tr '\n' ' '))"
+  kill $pids 2>/dev/null || true
+  for i in 1 2 3 4 5; do sleep 1; [ -n "$(client_pids)" ] || break; done
+  pids="$(client_pids)"
+  [ -n "$pids" ] && { log "killing unresponsive client processes"; kill -9 $pids 2>/dev/null || true; }
+fi
+for f in "${BIN_DIR}/spawnrelay.old" "${BIN_DIR}/spawnrelay.new"; do
+  [ -e "$f" ] && { log "removing leftover $f"; rm -f "$f"; }
+done
+# A client installed by an older version at /usr/local/bin is removed, unless
+# this host also runs the relay server (its binary lives there too).
+if [ "$BIN_DIR" != "/usr/local/bin" ] && [ -f /usr/local/bin/spawnrelay ] && [ ! -f /etc/systemd/system/spawnrelay-server.service ] && [ ! -f /etc/systemd/system/spawnrelay-agent.service ]; then
+  log "removing the client binary a previous version installed at /usr/local/bin/spawnrelay"
+  rm -f /usr/local/bin/spawnrelay
+fi
+
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 log "downloading spawnrelay for ${os}/${arch} from ${ADMIN_URL}"
@@ -74,7 +106,7 @@ if [ "$use_systemd" = "1" ]; then
   chown -R "$SVC_USER:$SVC_USER" "$BIN_DIR"
   chmod 0755 "$BIN_DIR"
   if [ "$BIN_DIR" != "/usr/local/bin" ] && [ -f /usr/local/bin/spawnrelay ]; then
-    log "note: an older client binary remains at /usr/local/bin/spawnrelay; the service now runs ${BIN_DIR}/spawnrelay"
+    log "note: /usr/local/bin/spawnrelay belongs to the relay server on this host; the client service runs ${BIN_DIR}/spawnrelay"
   fi
 fi
 

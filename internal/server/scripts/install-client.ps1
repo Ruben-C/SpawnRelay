@@ -24,10 +24,22 @@ if (-not $isAdmin) { throw 'Please run this installer from an elevated (Administ
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } elseif ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { '386' }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# Stop a previous instance so the binary can be replaced.
-schtasks /End /TN $TaskName 2>$null | Out-Null
-Get-Process spawnrelay -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Remove-Item -Force -ErrorAction SilentlyContinue "$Exe.old"
+# Previous versions: stop and remove the old task, end any client process
+# still running so the binary can be replaced, and remove leftovers.
+if (schtasks /Query /TN $TaskName 2>$null) {
+  Log "stopping scheduled task '$TaskName' from the previous version"
+  schtasks /End /TN $TaskName 2>$null | Out-Null
+  schtasks /Delete /F /TN $TaskName 2>$null | Out-Null
+}
+$running = Get-CimInstance Win32_Process -Filter "Name = 'spawnrelay.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match '\sclient(\s|$)' }
+foreach ($p in $running) {
+  Log "stopping spawnrelay client process (pid $($p.ProcessId))"
+  Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+}
+if ($running) { Start-Sleep -Seconds 2 }
+foreach ($leftover in @("$Exe.old", "$Exe.new")) {
+  if (Test-Path $leftover) { Log "removing leftover $leftover"; Remove-Item -Force -ErrorAction SilentlyContinue $leftover }
+}
 
 Log "downloading spawnrelay for windows/$arch from $AdminUrl"
 $url = "$AdminUrl/dl/spawnrelay_windows_$arch.exe"

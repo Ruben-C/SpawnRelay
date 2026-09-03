@@ -45,6 +45,56 @@ release_url() { # $1 = asset name
   fi
 }
 
+# ---- previous versions -----------------------------------------------------
+# Re-running the installer over an earlier version: stop and disable its
+# units, remove units this version no longer writes, kill anything left
+# running outside systemd (it would hold the ports), and remove leftovers.
+# State, certificates, server.env and the served client binaries are kept.
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
+UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+server_pids() { pgrep -f '^([^ ]*/)?spawnrelay (server|agent|firewall-agent)( |$)' 2>/dev/null || true; }
+cleanup_previous() {
+  local unit pids i
+  for unit in spawnrelay-server spawnrelay-agent spawnrelay-firewall; do
+    [ -f "$UNIT_DIR/$unit.service" ] || continue
+    if $SYSTEMCTL is-active --quiet "$unit.service" 2>/dev/null || $SYSTEMCTL is-enabled --quiet "$unit.service" 2>/dev/null; then
+      log "stopping $unit.service from the previous version"
+      $SYSTEMCTL disable --now "$unit.service" >/dev/null 2>&1 || true
+    fi
+  done
+  if [ -f "$UNIT_DIR/spawnrelay-firewall.service" ]; then
+    log "removing spawnrelay-firewall.service (replaced by spawnrelay-agent.service)"
+    rm -f "$UNIT_DIR/spawnrelay-firewall.service"
+    $SYSTEMCTL daemon-reload >/dev/null 2>&1 || true
+  fi
+  pids="$(server_pids)"
+  if [ -n "$pids" ]; then
+    log "stopping spawnrelay processes left running outside systemd (pid $(echo $pids | tr '\n' ' '))"
+    kill $pids 2>/dev/null || true
+    for i in 1 2 3 4 5; do
+      sleep 1
+      [ -n "$(server_pids)" ] || break
+    done
+    pids="$(server_pids)"
+    if [ -n "$pids" ]; then
+      log "killing unresponsive spawnrelay processes (pid $(echo $pids | tr '\n' ' '))"
+      kill -9 $pids 2>/dev/null || true
+    fi
+  fi
+  for f in "$DATA_DIR/firewall.sock" "$DATA_DIR/agent.sock" "$BIN.previous" "$BIN.new" "$DATA_DIR/server-update.json"; do
+    if [ -e "$f" ] || [ -S "$f" ]; then
+      log "removing leftover $f"
+      rm -f "$f"
+    fi
+  done
+  if [ -d "$DATA_DIR/updates" ]; then
+    log "removing leftover $DATA_DIR/updates"
+    rm -rf "$DATA_DIR/updates"
+  fi
+}
+cleanup_previous
+[ "${SPAWNRELAY_CLEANUP_ONLY:-0}" = "1" ] && exit 0
+
 # ---- binary ---------------------------------------------------------------
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -97,6 +147,8 @@ SPAWNRELAY_DATA_DIR=${DATA_DIR}
 SPAWNRELAY_TUNNEL_ADDR=:${TUNNEL_PORT}
 SPAWNRELAY_ADMIN_ADDR=:${ADMIN_PORT}
 SPAWNRELAY_PUBLIC_HOST=${PUBLIC_HOST}
+# Optional: GitHub repository whose releases are offered as server updates
+#SPAWNRELAY_REPO=${REPO}
 # Optional: use your own certificate for the management interface
 #SPAWNRELAY_ADMIN_CERT=/etc/letsencrypt/live/relay.example.com/fullchain.pem
 #SPAWNRELAY_ADMIN_KEY=/etc/letsencrypt/live/relay.example.com/privkey.pem
@@ -108,20 +160,20 @@ else
   log "keeping existing $CONF_DIR/server.env"
 fi
 
-# The firewall agent runs as root so the relay server itself never needs
-# firewall privileges. It only ever adds/removes rules tagged "spawnrelay:".
-cat >/etc/systemd/system/spawnrelay-firewall.service <<UNIT
+# The agent runs as root so the relay server itself never needs privileges.
+# It only ever adds/removes firewall rules tagged "spawnrelay:", and it
+# installs server updates requested from the management interface.
+cat >"$UNIT_DIR/spawnrelay-agent.service" <<UNIT
 [Unit]
-Description=SpawnRelay firewall agent (opens/closes relay ports in the host firewall)
+Description=SpawnRelay agent (host firewall ports and server updates for the relay)
 After=network-online.target ufw.service firewalld.service nftables.service
 Wants=network-online.target
 
 [Service]
 EnvironmentFile=${CONF_DIR}/server.env
-ExecStart=${BIN} firewall-agent
+ExecStart=${BIN} agent
 Restart=always
 RestartSec=3
-NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes
 
@@ -129,11 +181,11 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 UNIT
 
-cat >/etc/systemd/system/spawnrelay-server.service <<UNIT
+cat >"$UNIT_DIR/spawnrelay-server.service" <<UNIT
 [Unit]
 Description=SpawnRelay relay server
-After=network-online.target spawnrelay-firewall.service
-Wants=network-online.target spawnrelay-firewall.service
+After=network-online.target spawnrelay-agent.service
+Wants=network-online.target spawnrelay-agent.service
 
 [Service]
 User=${SVC_USER}
@@ -154,10 +206,10 @@ LimitNOFILE=65536
 [Install]
 WantedBy=multi-user.target
 UNIT
-chmod 0644 /etc/systemd/system/spawnrelay-firewall.service /etc/systemd/system/spawnrelay-server.service
+chmod 0644 "$UNIT_DIR/spawnrelay-agent.service" "$UNIT_DIR/spawnrelay-server.service"
 systemctl daemon-reload
-systemctl enable --now spawnrelay-firewall.service
-systemctl restart spawnrelay-firewall.service
+systemctl enable --now spawnrelay-agent.service
+systemctl restart spawnrelay-agent.service
 systemctl enable --now spawnrelay-server.service
 systemctl restart spawnrelay-server.service
 
@@ -183,8 +235,8 @@ echo "  Tunnel port   : ${TUNNEL_PORT}/tcp"
 [ -n "$FINGERPRINT" ] && echo "  Fingerprint   : sha256:${FINGERPRINT}"
 echo
 echo "  The UI uses a self-signed certificate; your browser will warn once."
-echo "  Host firewall : managed by spawnrelay-firewall (ufw/firewalld/nftables/iptables detected"
+echo "  Host firewall : managed by spawnrelay-agent (ufw/firewalld/nftables/iptables detected"
 echo "                  automatically; see Settings in the UI). It opens ${TUNNEL_PORT}/tcp,"
 echo "                  ${ADMIN_PORT}/tcp and every forward you create."
 echo "  If this VPS sits behind a cloud security group, open those ports there too."
-echo "  Logs: journalctl -u spawnrelay-server -u spawnrelay-firewall -f"
+echo "  Logs: journalctl -u spawnrelay-server -u spawnrelay-agent -f"

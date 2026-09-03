@@ -3,7 +3,7 @@
 //
 // The relay server runs unprivileged and must not be able to rewrite the host
 // firewall, so the work is split in two: a small root-only agent
-// (spawnrelay firewall-agent) listens on a unix socket in the data directory
+// (spawnrelay agent, see internal/agent) listens on a unix socket in the data directory
 // and accepts exactly one kind of request, "make the set of ports SpawnRelay
 // has opened equal to this list". The server (see the Client in this package)
 // sends that list whenever a forward changes and periodically thereafter.

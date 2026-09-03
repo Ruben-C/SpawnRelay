@@ -32,11 +32,14 @@ writes `/etc/spawnrelay/server.env`, starts `spawnrelay-server.service` and
 prints the management URL, the generated admin password and the tunnel
 certificate fingerprint.
 
-The installer also starts `spawnrelay-firewall.service`, a small root-only
+The installer also starts `spawnrelay-agent.service`, a small root-only
 agent that opens and closes ports in the VPS's own firewall (ufw, firewalld,
-nftables or iptables, detected automatically) as you manage forwards. See
-[Host firewall](#host-firewall). If your VPS sits behind a cloud security
-group, open these there:
+nftables or iptables, detected automatically) as you manage forwards, and
+installs server updates you start from the management UI. See
+[Host firewall](#host-firewall) and [Updating](#updating). Re-running the
+installer over an earlier version stops and removes its services and
+leftovers first; your state, certificates and `server.env` are kept. If your
+VPS sits behind a cloud security group, open these there:
 
 | Port | Purpose |
 |---|---|
@@ -87,6 +90,22 @@ counters and active connection counts are shown live.
 
 ## Updating
 
+**Server.** The management UI checks GitHub for new releases every hour and
+shows an **update** badge on the Settings tab (plus a one-time notice) when
+one exists. **Settings → Server updates** installs it: the server downloads
+the release's client binaries and verifies them against the release's
+`SHA256SUMS`, then the root agent downloads and verifies the server binary on
+its own, keeps the previous one as `spawnrelay.previous`, swaps it in and
+restarts the relay. If the new version does not answer within a minute the
+agent puts the previous binary back. Players are disconnected for a few
+seconds and you sign in again afterwards. Only newer releases are offered
+(no downgrades, no dev builds); hosts without the agent are shown the
+one-line installer instead, which is also how you update by hand:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ruben-C/SpawnRelay/main/scripts/install-server.sh | sudo bash
+```
+
 **Server:** re-run the server installer. It keeps your configuration and
 state, replaces the binary, refreshes the client binaries it serves and
 restarts the services.
@@ -114,9 +133,10 @@ ports are kept open too. The **Forwards** tab shows the firewall state of
 every forward and **Settings → Host firewall** shows which backend is in use.
 
 - The relay server itself stays unprivileged. Firewall changes are made by
-  `spawnrelay firewall-agent`, a root-only helper (`spawnrelay-firewall.service`)
-  that listens on `/var/lib/spawnrelay/firewall.sock` and accepts exactly one
-  request: the list of ports that should be open.
+  `spawnrelay agent`, a root-only helper (`spawnrelay-agent.service`) that
+  listens on `/var/lib/spawnrelay/agent.sock` and accepts only two kinds of
+  request: the list of ports that should be open, and a release tag to
+  install (see [Updating](#updating)).
 - Every rule it creates is tagged `spawnrelay:<id>`. It never touches other
   rules, so your SSH rule and anything else you configured by hand are safe,
   and a hand-made rule that already allows a forward's port is reused rather
@@ -166,7 +186,8 @@ Server flags (each also readable from the environment variable in brackets):
 | `--admin-addr` `[SPAWNRELAY_ADMIN_ADDR]` | `:8443` | HTTPS management UI/API |
 | `--public-host` `[SPAWNRELAY_PUBLIC_HOST]` | detected | hostname/IP used in install commands and player addresses |
 | `--admin-cert` / `--admin-key` | self-signed | your own certificate for the management interface |
-| `--firewall-socket` `[SPAWNRELAY_FIREWALL_SOCKET]` | `<data-dir>/firewall.sock` | unix socket of the firewall agent |
+| `--agent-socket` `[SPAWNRELAY_AGENT_SOCKET]` | `<data-dir>/agent.sock` | unix socket of the root agent (`--firewall-socket` still works) |
+| `--update-repo` `[SPAWNRELAY_REPO]` | `Ruben-C/SpawnRelay` | GitHub repository whose releases are offered as server updates |
 | `--reset-admin-password` | – | generate a new admin password at start (written to `<data-dir>/initial-admin-password`) |
 | `--log-level`, `--log-format` | `info`, `text` | logging |
 
@@ -174,10 +195,13 @@ Client flags: `--server host:port`, `--token`, `--fingerprint`, `--env-file`,
 `--allow-update` (default true) (`[SPAWNRELAY_SERVER]`, `[SPAWNRELAY_TOKEN]`,
 `[SPAWNRELAY_FINGERPRINT]`, `[SPAWNRELAY_ALLOW_UPDATE]`).
 
-Firewall agent flags (`spawnrelay firewall-agent`, run as root): `--data-dir`,
-`--socket` (`[SPAWNRELAY_FIREWALL_SOCKET]`), `--log-level`, `--log-format`.
-The backend is chosen from the server's settings on every request, so the
-agent needs no configuration of its own.
+Agent flags (`spawnrelay agent`, run as root; `spawnrelay firewall-agent`
+still works): `--data-dir`, `--socket` (`[SPAWNRELAY_AGENT_SOCKET]`),
+`--update-repo` (`[SPAWNRELAY_REPO]`), `--admin-addr` (probed after an
+update), `--no-updates` (`[SPAWNRELAY_NO_UPDATES]`, refuse server updates),
+`--log-level`, `--log-format`. The firewall backend is chosen from the
+server's settings on every request, so the agent needs no configuration of
+its own.
 
 Serving client binaries for other platforms: the server hands out its own
 executable to clients on the same OS/architecture. For other platforms put

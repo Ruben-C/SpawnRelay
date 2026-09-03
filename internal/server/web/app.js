@@ -4,7 +4,9 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  const state = { tab: "clients", status: null, clients: [], groups: [], tokens: [], settings: null, timer: null, expanded: new Set() };
+  const state = { tab: "clients", status: null, clients: [], groups: [], tokens: [], settings: null, update: null, updating: false, timer: null, expanded: new Set() };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const remember = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } } };
 
   // ---- API ----------------------------------------------------------------
   async function api(method, path, body) {
@@ -16,7 +18,10 @@
     });
     let data = null;
     try { data = await res.json(); } catch { /* no body */ }
-    if (res.status === 401 && !path.endsWith("/auth/login")) { showLogin(); throw new Error("Session expired, please sign in again"); }
+    if (res.status === 401 && !path.endsWith("/auth/login")) {
+      if (state.updating) { state.updating = false; toast("The server restarted; please sign in again"); }
+      showLogin(); throw new Error("Session expired, please sign in again");
+    }
     if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
     return data;
   }
@@ -70,9 +75,21 @@
   function showLogin() { clearInterval(state.timer); $("#app").hidden = true; $("#login").hidden = false; $("input[name=password]", $("#login-form")).focus(); }
   function showApp() { $("#login").hidden = true; $("#app").hidden = false; }
 
+  // Update indicator: a badge on the Settings tab plus a one-time toast per version.
+  function updateIndicator(su) {
+    const badge = $("#settings-badge");
+    if (!su || !su.available) { badge.hidden = true; return; }
+    badge.hidden = false;
+    if (remember.get("sr.updateToast") !== su.version) {
+      remember.set("sr.updateToast", su.version);
+      toast(`SpawnRelay ${su.version} is available — open Settings to update`);
+    }
+  }
+
   function renderStats() {
     const s = state.status; if (!s) return;
     $("#server-host").textContent = s.public_host;
+    updateIndicator(s.server_update);
     $("#stats").innerHTML = `
       <div class="stat"><div class="label">Clients online</div><div class="value">${s.clients_online} <span class="muted">/ ${s.clients_total}</span></div></div>
       <div class="stat"><div class="label">Port forwards</div><div class="value">${s.forward_groups_total} <span class="muted small">${s.forwards_total} port${s.forwards_total === 1 ? "" : "s"}</span></div></div>
@@ -212,6 +229,7 @@
     $("#firewall-status").innerHTML = fwStatusText(st.firewall_status);
     const au = $("#updates-form input[name=auto_update_clients]");
     if (document.activeElement !== au) au.checked = !!st.auto_update_clients;
+    renderUpdateCard();
     $("#updates-status").textContent = st.server_version === "dev"
       ? "This server runs a development build; automatic updates are paused until it runs a release version."
       : `Clients are updated to the server's version (${st.server_version}). Update the server first, then push.`;
@@ -223,6 +241,54 @@
       <dt>Admin cert</dt><dd>${s.admin_self_signed ? "self-signed (browser warning expected)" : "custom certificate"}</dd>`;
   }
 
+  function renderUpdateCard() {
+    const u = state.update, el = $("#server-update");
+    if (!u) { el.innerHTML = '<div class="muted">Checking for releases…</div>'; return; }
+    const line = (cls, text) => `<div class="${cls}">${text}</div>`;
+    let out = line("", `Running <span class="mono">${esc(u.running_version)}</span>`);
+    if (u.latest_version) out += line("", `Latest release <span class="mono">${esc(u.latest_version)}</span>${u.checked_at ? ` <span class="subtle">· checked ${fmtAgo(u.checked_at)}</span>` : ""}`);
+    if (u.check_error) out += line("warn-text", `Release check failed: ${esc(u.check_error)}`);
+    const l = u.last;
+    if (state.updating) out += line("warn-text", `Updating… ${esc(l && l.detail || "")}`);
+    else if (l) {
+      if (l.state === "pending") out += line("warn-text", `Update in progress: ${esc(l.detail || "")}`);
+      else if (l.state === "done") out += line("ok", `Updated from ${esc(l.from)} to ${esc(l.to)} · ${fmtAgo(l.finished_at)}`);
+      else out += line("err", `Update to ${esc(l.to)} ${l.state === "rolled_back" ? "rolled back" : "failed"} ${fmtAgo(l.finished_at)}: ${esc(l.detail || "")}`);
+    }
+    let actions = `<button class="btn small" data-action="check-update" ${state.updating ? "disabled" : ""}>Check now</button>`;
+    if (u.available && u.supported && !state.updating) actions += ` <button class="btn small primary" data-action="start-update" data-version="${esc(u.latest_version)}">Update to ${esc(u.latest_version)}</button>`;
+    else if (u.available && !u.supported) {
+      out += line("warn-text", esc(u.reason || "This host cannot be updated from the UI."));
+      out += `<div class="cmd-block"><div class="cmd-head"><span>Update by hand (as root on the server)</span><button class="btn small ghost" data-copy="${esc(u.install_command)}">Copy</button></div><pre class="cmd">${esc(u.install_command)}</pre></div>`;
+    } else if (!u.available && u.reason) out += line("muted", esc(u.reason));
+    el.innerHTML = out + `<div class="form-actions" style="justify-content:flex-start">${actions}</div>`;
+  }
+
+  // After an update starts, watch the health endpoint until the new version
+  // answers (sessions do not survive the restart) or the attempt ends.
+  async function watchUpdate(from) {
+    state.updating = true; clearInterval(state.timer); renderUpdateCard();
+    const started = Date.now();
+    while (Date.now() - started < 5 * 60 * 1000) {
+      await sleep(2000);
+      let health = null;
+      try { health = await (await fetch("/api/v1/health", { credentials: "same-origin" })).json(); } catch { /* restarting */ }
+      if (health && health.version && health.version !== from) {
+        state.updating = false; toast(`Updated to ${health.version}. Please sign in again.`); showLogin(); return;
+      }
+      try {
+        state.update = await api("GET", "/api/v1/server/update"); renderUpdateCard();
+        const l = state.update.last;
+        if (l && l.state !== "pending") {
+          state.updating = false;
+          if (l.state !== "done") toast(`Update ${l.state === "rolled_back" ? "rolled back" : "failed"}: ${l.detail || ""}`, true);
+          start(); return;
+        }
+      } catch (e) { if (/sign in/.test(e.message)) return; }
+    }
+    state.updating = false; start();
+  }
+
   const FW_LABELS = { auto: "Automatic (detect ufw, firewalld, nftables or iptables)", off: "Off (do not touch the firewall)", ufw: "ufw", firewalld: "firewalld", nftables: "nftables", iptables: "iptables" };
 
   function fwStatusText(fs) {
@@ -230,8 +296,8 @@
     const line = (cls, text) => `<div class="${cls}">${text}</div>`;
     switch (fs.agent) {
       case "off": return line("muted", "Firewall management is off. The tunnel, management and forward ports must be opened by hand.");
-      case "not installed": return line("warn-text", `Firewall agent not running (no socket at <span class="mono">${esc(fs.socket)}</span>). Re-run the server installer to add the <span class="mono">spawnrelay-firewall</span> service, or open ports by hand.`);
-      case "unreachable": return line("err", `Firewall agent did not answer: ${esc(fs.error || "unknown error")}`);
+      case "not installed": return line("warn-text", `Agent not running (no socket at <span class="mono">${esc(fs.socket)}</span>). Re-run the server installer to add the <span class="mono">spawnrelay-agent</span> service, or open ports by hand.`);
+      case "unreachable": return line("err", `Agent did not answer: ${esc(fs.error || "unknown error")}`);
     }
     let out = "";
     if (fs.backend === "none") out += line("warn-text", "Agent connected, but no active host firewall was detected. If this VPS uses a cloud security group, open the ports there.");
@@ -251,15 +317,16 @@
 
   async function refresh() {
     try {
+      if (state.updating) return;
       const jobs = [api("GET", "/api/v1/status"), api("GET", "/api/v1/clients")];
       if (state.tab === "forwards") jobs.push(api("GET", "/api/v1/forward-groups"));
       if (state.tab === "tokens") jobs.push(api("GET", "/api/v1/tokens"));
-      if (state.tab === "settings") jobs.push(api("GET", "/api/v1/settings"));
-      const [status, clients, extra] = await Promise.all(jobs);
+      if (state.tab === "settings") jobs.push(api("GET", "/api/v1/settings"), api("GET", "/api/v1/server/update"));
+      const [status, clients, extra, extra2] = await Promise.all(jobs);
       state.status = status; state.clients = clients;
       if (state.tab === "forwards") state.groups = extra;
       if (state.tab === "tokens") state.tokens = extra;
-      if (state.tab === "settings") state.settings = extra;
+      if (state.tab === "settings") { state.settings = extra; state.update = extra2; }
       render();
     } catch (e) { if (!/sign in/.test(e.message)) fail(e); }
   }
@@ -422,6 +489,15 @@
           }
           break;
         }
+        case "check-update":
+          state.update = await api("POST", "/api/v1/server/update/check"); renderUpdateCard();
+          toast(state.update.available ? `${state.update.latest_version} is available` : "No newer release"); break;
+        case "start-update":
+          if (await confirmDialog("Update the server?", `Install ${btn.dataset.version} now? The relay restarts and every player is disconnected for a few seconds. You will need to sign in again afterwards.`, "Update")) {
+            const from = state.status.version;
+            state.update = await api("POST", "/api/v1/server/update"); toast("Update started"); watchUpdate(from);
+          }
+          break;
         case "new-token": tokenModal(); break;
         case "delete-token":
           if (await confirmDialog("Revoke token?", "Anything using this token will stop working immediately.", "Revoke")) {

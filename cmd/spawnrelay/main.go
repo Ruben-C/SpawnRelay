@@ -15,8 +15,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Ruben-C/SpawnRelay/internal/agent"
 	"github.com/Ruben-C/SpawnRelay/internal/client"
-	"github.com/Ruben-C/SpawnRelay/internal/firewall"
 	"github.com/Ruben-C/SpawnRelay/internal/server"
 )
 
@@ -28,7 +28,7 @@ const usageText = `SpawnRelay %s - expose local game servers through a relay wit
 Usage:
   spawnrelay server [flags]          run the relay server (tunnel + management UI/API)
   spawnrelay client [flags]          connect this machine to a relay server
-  spawnrelay firewall-agent [flags]  root helper that opens/closes host firewall ports for the server
+  spawnrelay agent [flags]           root helper next to the server: host firewall ports and server updates
   spawnrelay version                 print the version
 
 Run "spawnrelay <command> -h" for flags. Every flag can also be set through
@@ -46,8 +46,8 @@ func main() {
 		err = runServer(os.Args[2:])
 	case "client":
 		err = runClient(os.Args[2:])
-	case "firewall-agent":
-		err = runFirewallAgent(os.Args[2:])
+	case "agent", "firewall-agent": // firewall-agent: name before v0.5
+		err = runAgent(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "-h", "--help":
@@ -185,7 +185,9 @@ func runServer(args []string) error {
 	fs.StringVar(&cfg.PublicHost, "public-host", envOr("SPAWNRELAY_PUBLIC_HOST", ""), "public hostname or IP of this server; saved to settings [SPAWNRELAY_PUBLIC_HOST]")
 	fs.StringVar(&cfg.AdminCert, "admin-cert", envOr("SPAWNRELAY_ADMIN_CERT", ""), "PEM certificate for the management interface (default: self-signed) [SPAWNRELAY_ADMIN_CERT]")
 	fs.StringVar(&cfg.AdminKey, "admin-key", envOr("SPAWNRELAY_ADMIN_KEY", ""), "PEM private key for the management interface [SPAWNRELAY_ADMIN_KEY]")
-	fs.StringVar(&cfg.FirewallSocket, "firewall-socket", envOr("SPAWNRELAY_FIREWALL_SOCKET", ""), "unix socket of the firewall agent (default: <data-dir>/firewall.sock) [SPAWNRELAY_FIREWALL_SOCKET]")
+	fs.StringVar(&cfg.AgentSocket, "agent-socket", envOr("SPAWNRELAY_AGENT_SOCKET", envOr("SPAWNRELAY_FIREWALL_SOCKET", "")), "unix socket of the root agent (default: <data-dir>/agent.sock) [SPAWNRELAY_AGENT_SOCKET]")
+	fs.StringVar(&cfg.AgentSocket, "firewall-socket", cfg.AgentSocket, "alias of --agent-socket (name before v0.5)")
+	fs.StringVar(&cfg.UpdateRepo, "update-repo", envOr("SPAWNRELAY_REPO", server.DefaultUpdateRepo), "GitHub repository whose releases are offered as server updates [SPAWNRELAY_REPO]")
 	fs.BoolVar(&cfg.ResetAdminPassword, "reset-admin-password", envBool("SPAWNRELAY_RESET_ADMIN_PASSWORD"), "generate a new admin password at startup [SPAWNRELAY_RESET_ADMIN_PASSWORD]")
 	fs.StringVar(&logLevel, "log-level", envOr("SPAWNRELAY_LOG_LEVEL", "info"), "debug|info|warn|error [SPAWNRELAY_LOG_LEVEL]")
 	fs.StringVar(&logFormat, "log-format", envOr("SPAWNRELAY_LOG_FORMAT", "text"), "text|json [SPAWNRELAY_LOG_FORMAT]")
@@ -205,15 +207,22 @@ func runServer(args []string) error {
 	return srv.Run(signalContext())
 }
 
-func runFirewallAgent(args []string) error {
+func runAgent(args []string) error {
 	if err := preloadEnvFile(args); err != nil {
 		return err
 	}
-	fs := flag.NewFlagSet("firewall-agent", flag.ExitOnError)
-	var dataDir, socket, logLevel, logFormat, envFile string
+	fs := flag.NewFlagSet("agent", flag.ExitOnError)
+	var dataDir, socket, logLevel, logFormat, envFile, repo, adminAddr, binPath, serverUnit, agentUnit string
+	var noUpdates bool
 	fs.StringVar(&envFile, "env-file", "", "file with KEY=VALUE lines to load into the environment first")
 	fs.StringVar(&dataDir, "data-dir", envOr("SPAWNRELAY_DATA_DIR", defaultDataDir()), "server state directory; the socket is created there [SPAWNRELAY_DATA_DIR]")
-	fs.StringVar(&socket, "socket", envOr("SPAWNRELAY_FIREWALL_SOCKET", ""), "unix socket path (default: <data-dir>/firewall.sock) [SPAWNRELAY_FIREWALL_SOCKET]")
+	fs.StringVar(&socket, "socket", envOr("SPAWNRELAY_AGENT_SOCKET", envOr("SPAWNRELAY_FIREWALL_SOCKET", "")), "unix socket path (default: <data-dir>/agent.sock) [SPAWNRELAY_AGENT_SOCKET]")
+	fs.StringVar(&repo, "update-repo", envOr("SPAWNRELAY_REPO", server.DefaultUpdateRepo), "GitHub repository to install server updates from [SPAWNRELAY_REPO]")
+	fs.StringVar(&adminAddr, "admin-addr", envOr("SPAWNRELAY_ADMIN_ADDR", ":8443"), "the server's management address, probed after an update [SPAWNRELAY_ADMIN_ADDR]")
+	fs.StringVar(&binPath, "binary", envOr("SPAWNRELAY_BINARY_PATH", ""), "installed spawnrelay binary to replace on update (default: this executable) [SPAWNRELAY_BINARY_PATH]")
+	fs.StringVar(&serverUnit, "server-unit", envOr("SPAWNRELAY_SERVER_UNIT", "spawnrelay-server.service"), "systemd unit of the relay server [SPAWNRELAY_SERVER_UNIT]")
+	fs.StringVar(&agentUnit, "agent-unit", envOr("SPAWNRELAY_AGENT_UNIT", "spawnrelay-agent.service"), "systemd unit of this agent, restarted after an update [SPAWNRELAY_AGENT_UNIT]")
+	fs.BoolVar(&noUpdates, "no-updates", envBool("SPAWNRELAY_NO_UPDATES"), "refuse to install server updates [SPAWNRELAY_NO_UPDATES]")
 	fs.StringVar(&logLevel, "log-level", envOr("SPAWNRELAY_LOG_LEVEL", "info"), "debug|info|warn|error [SPAWNRELAY_LOG_LEVEL]")
 	fs.StringVar(&logFormat, "log-format", envOr("SPAWNRELAY_LOG_FORMAT", "text"), "text|json [SPAWNRELAY_LOG_FORMAT]")
 	if err := fs.Parse(args); err != nil {
@@ -224,13 +233,24 @@ func runFirewallAgent(args []string) error {
 		return err
 	}
 	if socket == "" {
-		socket = filepath.Join(dataDir, "firewall.sock")
+		socket = filepath.Join(dataDir, "agent.sock")
 	}
 	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
-		log.Warn("firewall agent is not running as root; firewall changes will most likely fail")
+		log.Warn("agent is not running as root; firewall changes and updates will most likely fail")
 	}
-	log.Info("SpawnRelay firewall agent starting", "version", version, "socket", socket)
-	return firewall.Serve(signalContext(), firewall.AgentConfig{Socket: socket, LedgerDir: dataDir, Version: version, Logger: log})
+	var updater *agent.Updater
+	if !noUpdates && runtime.GOOS == "linux" {
+		if binPath == "" {
+			if exe, err := os.Executable(); err == nil {
+				if real, err := filepath.EvalSymlinks(exe); err == nil {
+					binPath = real
+				}
+			}
+		}
+		updater = &agent.Updater{Repo: repo, BinPath: binPath, DataDir: dataDir, ServerUnit: serverUnit, AgentUnit: agentUnit, AdminAddr: adminAddr, Version: version, Logger: log}
+	}
+	log.Info("SpawnRelay agent starting", "version", version, "socket", socket, "updates", updater != nil)
+	return agent.Serve(signalContext(), agent.Config{Socket: socket, DataDir: dataDir, Version: version, Logger: log, Updater: updater})
 }
 
 func runClient(args []string) error {

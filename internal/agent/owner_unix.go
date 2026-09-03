@@ -1,6 +1,6 @@
 //go:build !windows
 
-package firewall
+package agent
 
 import (
 	"os"

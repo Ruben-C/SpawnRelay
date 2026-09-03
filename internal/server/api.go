@@ -59,6 +59,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/forwards/{id}", s.requireAuth(s.handleGetForward))
 	mux.HandleFunc("PATCH /api/v1/forwards/{id}", s.requireAuth(s.handleUpdateForward))
 	mux.HandleFunc("DELETE /api/v1/forwards/{id}", s.requireAuth(s.handleDeleteForward))
+	mux.HandleFunc("GET /api/v1/server/update", s.requireSession(s.handleUpdateStatus))
+	mux.HandleFunc("POST /api/v1/server/update/check", s.requireSession(s.handleUpdateCheck))
+	mux.HandleFunc("POST /api/v1/server/update", s.requireSession(s.handleUpdateStart))
 	mux.HandleFunc("GET /api/v1/forward-groups", s.requireAuth(s.handleListGroups))
 	mux.HandleFunc("POST /api/v1/forward-groups", s.requireAuth(s.handleCreateGroup))
 	mux.HandleFunc("GET /api/v1/forward-groups/{id}", s.requireAuth(s.handleGetGroup))
@@ -254,6 +257,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"clients_online":       online,
 		"forwards_total":       forwards,
 		"forward_groups_total": groups,
+		"server_update":        s.updater.statusOut(),
 		"os":                   runtime.GOOS,
 		"arch":                 runtime.GOARCH,
 	})

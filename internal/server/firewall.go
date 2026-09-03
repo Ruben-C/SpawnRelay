@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/Ruben-C/SpawnRelay/internal/agent"
 	"github.com/Ruben-C/SpawnRelay/internal/firewall"
 	"github.com/Ruben-C/SpawnRelay/internal/store"
 )
@@ -54,7 +56,8 @@ const (
 // firewall agent. Syncs are serialised; the last outcome is cached so API
 // reads never block on the agent.
 type fwManager struct {
-	socket     string
+	socket     string // explicit socket path, or "" to look in dataDir
+	dataDir    string
 	tunnelPort int
 	adminPort  int
 	store      *store.Store
@@ -69,13 +72,33 @@ type fwManager struct {
 	failed bool
 }
 
-func newFwManager(st *store.Store, socket string, tunnelPort, adminPort int, log *slog.Logger) *fwManager {
-	return &fwManager{
-		socket: socket, tunnelPort: tunnelPort, adminPort: adminPort, store: st, log: log,
-		kick:   make(chan struct{}, 1),
-		status: FirewallStatus{Mode: firewall.ModeAuto, Agent: agentNotInstalled, Socket: socket},
-		rules:  map[string]firewall.RuleState{},
+func newFwManager(st *store.Store, socket, dataDir string, tunnelPort, adminPort int, log *slog.Logger) *fwManager {
+	m := &fwManager{
+		socket: socket, dataDir: dataDir, tunnelPort: tunnelPort, adminPort: adminPort, store: st, log: log,
+		kick:  make(chan struct{}, 1),
+		rules: map[string]firewall.RuleState{},
 	}
+	sock, _ := m.socketPath()
+	m.status = FirewallStatus{Mode: firewall.ModeAuto, Agent: agentNotInstalled, Socket: sock}
+	return m
+}
+
+// socketPath picks the agent socket: the explicit one when configured,
+// otherwise agent.sock in the data directory, falling back to the
+// firewall.sock an agent older than v0.5 creates (legacy: it syncs the
+// firewall but cannot install updates).
+func (m *fwManager) socketPath() (path string, legacy bool) {
+	if m.socket != "" {
+		return m.socket, filepath.Base(m.socket) == "firewall.sock"
+	}
+	cur := filepath.Join(m.dataDir, "agent.sock")
+	if agent.Available(cur) {
+		return cur, false
+	}
+	if old := filepath.Join(m.dataDir, "firewall.sock"); agent.Available(old) {
+		return old, true
+	}
+	return cur, false
 }
 
 // desired computes the rule set from the store plus the relay's own ports.
@@ -112,18 +135,19 @@ func (m *fwManager) Sync(ctx context.Context) {
 	defer m.syncMu.Unlock()
 
 	mode, rules := m.desired()
-	st := FirewallStatus{Mode: mode, Socket: m.socket}
+	socket, _ := m.socketPath()
+	st := FirewallStatus{Mode: mode, Socket: socket}
 	states := map[string]firewall.RuleState{}
 	failed := false
 
 	switch {
 	case mode == firewall.ModeOff:
 		st.Agent = agentOff
-	case !firewall.Available(m.socket):
+	case !agent.Available(socket):
 		st.Agent = agentNotInstalled
 	default:
 		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		resp, err := firewall.Sync(ctx, m.socket, mode, rules)
+		resp, err := agent.Sync(ctx, socket, mode, rules)
 		cancel()
 		now := time.Now()
 		st.LastSync = &now

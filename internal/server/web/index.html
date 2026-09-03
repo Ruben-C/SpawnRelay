@@ -27,7 +27,7 @@
       <button data-tab="clients" class="active">Clients</button>
       <button data-tab="forwards">Forwards</button>
       <button data-tab="tokens">API tokens</button>
-      <button data-tab="settings">Settings</button>
+      <button data-tab="settings">Settings <span id="settings-badge" class="badge warn" hidden>update</span></button>
     </nav>
     <div class="topbar-right">
       <span id="server-host" class="muted mono"></span>
@@ -80,11 +80,16 @@
         </form>
         <form id="firewall-form" class="card">
           <h3>Host firewall</h3>
-          <p class="muted">SpawnRelay can open and close ports in this server's firewall by itself: the tunnel port, the management port and every enabled forward. Disabled or deleted forwards are closed again. Only rules tagged <span class="mono">spawnrelay:</span> are ever touched.</p>
+          <p class="muted">The SpawnRelay agent, a small root helper next to the server, can open and close ports in this server's firewall by itself: the tunnel port, the management port and every enabled forward. Disabled or deleted forwards are closed again. Only rules tagged <span class="mono">spawnrelay:</span> are ever touched. The same agent installs server updates.</p>
           <label>Mode <select name="firewall"></select></label>
           <div class="small" id="firewall-status"></div>
           <button class="btn primary" type="submit">Save</button>
         </form>
+        <div class="card" id="update-card">
+          <h3>Server updates</h3>
+          <p class="muted">SpawnRelay checks GitHub for new releases every hour. Updating downloads and verifies the release, swaps the binary through the agent and restarts the relay; players are disconnected for a few seconds and you will need to sign in again. If the new version does not come up, the previous one is restored automatically.</p>
+          <div id="server-update"></div>
+        </div>
         <form id="updates-form" class="card">
           <h3>Client updates</h3>
           <p class="muted">The Clients tab shows each client's version and lets you push the server's version to it. The client fetches the binary through its own pinned tunnel, verifies the checksum and version, and restarts itself.</p>
